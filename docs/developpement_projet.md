@@ -103,28 +103,28 @@ La machine de développement (Ryzen 7 260, 15,29 Go de RAM, RTX 5050 8 Go) n'est
 ## Phase 1 — Validation de la chaîne (micro-VM Apache)
 
 ### 1.1 Noyau invité
-- [ ] Construire ou récupérer un noyau Linux invité minimal au format `vmlinux` (démarrage direct, pas d'UEFI — contrainte Firecracker sur x86_64).
-- [ ] Configuration noyau réduite : virtio-net, virtio-blk, virtio-vsock, ext4, pas de modules inutiles.
-- [ ] Documenter la configuration dans `images/kernel/README.md`.
+- [x] Noyau invité `vmlinux-6.1.155` récupéré depuis la chaîne d'intégration continue de Firecracker, empreinte SHA-256 vérifiée et figée.
+- [ ] Configuration noyau réduite : virtio-net, virtio-blk, virtio-vsock, ext4, pas de modules inutiles. **Reporté en Phase 4** : le noyau de la CI Firecracker suffit pour valider la chaîne.
+- [x] Configuration documentée dans `images/kernel/README.md`.
 
 ### 1.2 Rootfs Alpine + Apache
-- [ ] Script `images/web-apache/build.sh` : téléchargement du minirootfs Alpine, `apk add apache2`, configuration, création d'une image ext4.
-- [ ] Service Apache démarré par OpenRC au boot, page de test servie.
-- [ ] Image reproductible : même entrée, même somme de contrôle en sortie.
+- [x] Constructeur générique `images/build-image.sh` plutôt qu'un script par service : il lit `images/<service>/image.conf` et sera réutilisé tel quel pour tout le catalogue de la Phase 6.
+- [x] Apache démarré par OpenRC au boot, page de test servie.
+- [x] Image reproductible : versions Alpine et noyau figées, empreintes SHA-256 vérifiées au téléchargement, empreinte de l'image consignée dans son fichier de métadonnées.
 
 ### 1.3 Réseau virtuel minimal
-- [ ] Script créant un bridge hôte `br-test` et une interface `tap` par VM.
-- [ ] Attribution d'IP statique à la VM, route et NAT vers l'hôte.
-- [ ] Nettoyage automatique des interfaces en fin de script.
+- [x] `build/net-setup.sh` crée le bridge et l'interface tap, avec un garde-fou qui refuse un sous-réseau déjà routé par une autre interface.
+- [x] Adressage statique de la VM, routage et NAT vers l'hôte par nftables.
+- [x] Nettoyage automatique, vérifié par le test : ni interface ni processus résiduel.
 
 ### 1.4 Lancement Firecracker
-- [ ] Script `build/run-firecracker.sh` : configuration JSON (noyau, rootfs, tap, vCPU, RAM), démarrage via l'API sur socket Unix.
-- [ ] Récupérer la console série dans un fichier de log.
-- [ ] Mesurer le temps de démarrage.
+- [x] `build/run-firecracker.sh` configure la VM **par l'API REST sur socket Unix**, pas par fichier : c'est le chemin qu'empruntera le démon Go en Phase 2.
+- [x] Console série redirigée vers `output/run/<vm>/console.log`.
+- [x] Temps mesuré : environ 2,9 s du démarrage à la première réponse HTTP. Firecracker n'en représente qu'une centaine de millisecondes ; le reste est OpenRC puis Apache.
 
 ### 1.5 Premier contact avec le `jailer`
-- [ ] Relancer la même VM via le `jailer` (chroot, namespaces, cgroup, uid/gid dédiés).
-- [ ] Documenter les différences de configuration entre lancement direct et `jailer`.
+- [x] Même VM relancée sous `jailer` : elle tourne en utilisateur système `tinyvmos`, avec seccomp en mode strict, vérifié par le test.
+- [x] Différences documentées dans `build/run-firecracker.sh` et `images/kernel/README.md`.
 
 **Critère d'acceptation Phase 1** : `curl http://<ip-vm>` depuis l'hôte renvoie la page Apache, la VM démarre sous `jailer`, et le script de nettoyage ne laisse aucune interface résiduelle.
 
