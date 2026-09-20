@@ -1,0 +1,123 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  shell:
+    name: Scripts shell
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Installer shellcheck
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+
+      - name: Analyser tous les scripts suivis
+        run: |
+          set -euo pipefail
+          mapfile -t files < <(git ls-files '*.sh')
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "Aucun script shell suivi."
+            exit 0
+          fi
+          printf 'Analyse de %d script(s) :\n' "${#files[@]}"
+          printf '  %s\n' "${files[@]}"
+          shellcheck -S warning "${files[@]}"
+
+      - name: Verifier que les scripts sont executables
+        run: |
+          set -euo pipefail
+          fail=0
+          while IFS= read -r f; do
+            if [ ! -x "$f" ]; then
+              echo "::error file=$f::le script n est pas executable (git update-index --chmod=+x $f)"
+              fail=1
+            fi
+          done < <(git ls-files '*.sh')
+          exit $fail
+
+  go:
+    name: Demon Go
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Detecter la presence du module Go
+        id: detect
+        run: |
+          if [ -f controlplane/go.mod ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "Pas encore de module Go : etape ignoree jusqu a la Phase 2."
+          fi
+
+      - uses: actions/setup-go@v5
+        if: steps.detect.outputs.present == 'true'
+        with:
+          go-version-file: controlplane/go.mod
+          cache-dependency-path: controlplane/go.sum
+
+      - name: Verifier le formatage
+        if: steps.detect.outputs.present == 'true'
+        working-directory: controlplane
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::fichiers non formates :"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        if: steps.detect.outputs.present == 'true'
+        working-directory: controlplane
+        run: go vet ./...
+
+      - name: Compiler
+        if: steps.detect.outputs.present == 'true'
+        working-directory: controlplane
+        run: go build ./...
+
+      - name: Tester
+        if: steps.detect.outputs.present == 'true'
+        working-directory: controlplane
+        run: go test -race ./...
+
+      - name: Verifier la compilation croisee ARM64
+        if: steps.detect.outputs.present == 'true'
+        working-directory: controlplane
+        env:
+          GOOS: linux
+          GOARCH: arm64
+        run: go build ./...
+
+  secrets:
+    name: Absence de secrets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Refuser les fichiers de cles suivis
+        run: |
+          set -euo pipefail
+          found=$(git ls-files | grep -E '\.(key|pem|p12|jks|keystore)$|^secrets/|wg-.*\.conf$' || true)
+          if [ -n "$found" ]; then
+            echo "::error::des fichiers sensibles sont suivis par git :"
+            echo "$found"
+            exit 1
+          fi
+          echo "Aucun fichier de cle suivi."
