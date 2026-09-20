@@ -1,0 +1,46 @@
+# Artefacts de build
+/output/
+/build/output/
+/os/buildroot/dl/
+/os/buildroot/output/
+*.iso
+*.img
+*.vmdk
+*.ova
+*.ovf
+*.apk
+*.aab
+*.ext4
+*.squashfs
+vmlinux
+vmlinuz*
+bzImage
+
+# Go
+/controlplane/tinyvmosd
+/cli/tinyvmosctl
+*.test
+*.out
+
+# Front
+node_modules/
+/web/dist/
+
+# Flutter
+/mobile/build/
+/mobile/.dart_tool/
+
+# Secrets — ne doivent jamais entrer dans le dépôt
+*.key
+*.pem
+*.p12
+*.jks
+*.keystore
+/secrets/
+wg-*.conf
+
+# Divers
+.DS_Store
+*.swp
+*.log
+/tmp/
