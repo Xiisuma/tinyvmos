@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TinyVMOS — web-apache</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font-family: ui-monospace, "Cascadia Code", Menlo, Consolas, monospace;
+    max-width: 44rem; margin: 4rem auto; padding: 0 1rem; line-height: 1.6;
+  }
+  h1 { font-size: 1.4rem; margin-bottom: .2rem; }
+  p.sub { opacity: .7; margin-top: 0; }
+  dl { display: grid; grid-template-columns: max-content 1fr; gap: .3rem 1.2rem; }
+  dt { opacity: .7; }
+  code { background: rgba(127,127,127,.15); padding: .1rem .35rem; border-radius: .2rem; }
+</style>
+</head>
+<body>
+  <h1>web-apache</h1>
+  <p class="sub">Micro-VM Firecracker — chaîne validée.</p>
+
+  <dl>
+    <dt>Hyperviseur</dt><dd>Firecracker, lancé sous <code>jailer</code></dd>
+    <dt>Invité</dt><dd>Alpine Linux minimal</dd>
+    <dt>Service</dt><dd>Apache2, et rien d'autre</dd>
+    <dt>Principe</dt><dd>une VM, une utilité</dd>
+  </dl>
+
+  <p>
+    Si cette page s'affiche depuis l'hôte, la chaîne complète fonctionne :
+    noyau invité, système de fichiers racine, réseau virtuel, et démarrage
+    de la micro-VM par l'API de Firecracker.
+  </p>
+</body>
+</html>
