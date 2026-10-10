@@ -44,3 +44,7 @@ wg-*.conf
 *.swp
 *.log
 /tmp/
+/output/bin/
+/output/test-phase2a/
+/output/jail/
+/output/run/

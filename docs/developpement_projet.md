@@ -133,19 +133,19 @@ La machine de développement (Ryzen 7 260, 15,29 Go de RAM, RTX 5050 8 Go) n'est
 ## Phase 2 — Démon, API et réseau virtuel
 
 ### 2.1 Fondations du démon
-- [ ] Initialiser le module Go `controlplane/`.
+- [x] Module Go `controlplane/` initialisé, binaire `tinyvmosd`. **Deux binaires** retenus plutôt qu'un seul : le démon est Linux seulement par nature, `tinyvmosctl` doit compiler pour Windows et macOS.
 - [ ] Arborescence : `api/`, `vm/`, `network/`, `storage/`, `secrets/`, `audit/`, `pairing/`, `config/`, `state/`.
-- [ ] Journalisation structurée (`log/slog`), niveaux configurables.
-- [ ] Chargement de configuration, gestion des signaux, arrêt propre.
+- [x] Journalisation structurée avec `log/slog`, niveau réglable par `-log-level`.
+- [x] Gestion des signaux et arrêt propre : SIGTERM arrête toutes les VM, y compris celles en boucle de relance.
 - [ ] Unité systemd (ou script OpenRC selon la base de l'hôte) pour le démon.
 
 ### 2.2 Interface VMM et implémentation Firecracker
-- [ ] Définir l'interface Go `VMM` : `Create`, `Start`, `Stop`, `Delete`, `Restart`, `Console`, `Metrics`, `Snapshot`.
-- [ ] Implémenter `firecracker.go` en s'appuyant sur `firecracker-go-sdk`.
-- [ ] Lancement systématique via `jailer`, avec un uid/gid par VM.
-- [ ] Machine d'état explicite de la VM : `Created`, `Starting`, `Running`, `Stopping`, `Stopped`, `Failed`.
-- [ ] Redémarrage automatique sur crash, avec temporisation croissante et plafond.
-- [ ] Tests unitaires avec un VMM simulé.
+- [x] Interface `VMM` définie : `Create`, `Start`, `Stop`, `Delete`, `Metrics`, `ConsoleLogPath`, `Wait`. `Snapshot` reporté au lot où le stockage arrive.
+- [x] `firecracker.go` implémenté sur `firecracker-go-sdk` v1.0.0.
+- [x] Lancement systématique via `jailer`, utilisateur système `tinyvmos`, seccomp en mode strict, vérifié par test.
+- [x] Machine d'état explicite avec table de transitions : une transition absente de la table est refusée, pas tolérée.
+- [x] Relance automatique avec temporisation doublante de 1 s à 60 s, remise à zéro après 60 s de stabilité. Un arrêt demandé ne déclenche pas de relance.
+- [x] Tests unitaires avec `vm.FakeVMM` : machine d'état, supervision et temporisation exercées sans KVM ni Firecracker, donc aussi dans la CI.
 
 ### 2.3 Plan d'adressage et zones
 - [ ] Figer le plan d'adressage interne :
