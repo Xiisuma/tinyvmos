@@ -109,10 +109,10 @@ Conséquence : « cette zone a une sortie Internet » n'est pas un drapeau sur l
 un flux déclaré comme les autres. La promesse « aucune donnée ne sort » se vérifie donc en
 lisant la liste des flux, pas en fouillant le code.
 
-Un accès **entrant** depuis Internet est refusé à la validation, avec un message qui dit
-pourquoi : ce n'est pas un flux entre zones mais une publication de service, qui demande
-une redirection vers une VM précise. Pas encore pris en charge — mieux vaut un refus clair
-qu'une règle acceptée sans effet.
+Un accès **entrant** depuis Internet n'est pas un flux : il désigne **une** VM précise et
+demande une redirection de port. Le déclarer comme flux est refusé à la validation, avec un
+message qui renvoie vers les publications, décrites plus bas. Les deux concepts sont
+séparés parce que les mélanger aurait donné un type aux champs à moitié vides selon les cas.
 
 ### Texte plutôt que netlink
 
@@ -169,6 +169,47 @@ Seules les zones ayant un flux déclaré vers `internet` ont une entrée de trad
 zone sans ce flux n'en a pas : même si une route existait, ses paquets sortiraient avec une
 adresse privée et ne reviendraient jamais. Deux barrières valent mieux qu'une pour une
 promesse du genre « aucune donnée ne sort ».
+
+## Publication de services
+
+Une publication expose un port d'une VM sur l'interface de sortie de la machine. C'est ce
+qui rend un service joignable depuis le réseau, par exemple le serveur web d'un événement.
+
+```json
+[{"vm": "web1", "port": 80, "host_port": 8080, "comment": "serveur web"}]
+```
+
+Deux règles sont produites : la redirection elle-même, dans une chaîne `prerouting`, et
+l'autorisation du trafic redirigé à traverser vers la VM, dans `forward`.
+
+### `ct status dnat` n'est pas décoratif
+
+La règle de `forward` porte `ct status dnat`, et c'est une condition de sécurité, pas une
+précision de style.
+
+Sans elle, la règle accepte aussi un paquet venu de l'extérieur **visant directement
+l'adresse privée de la VM**, sans passer par la redirection. Sur un réseau plat où
+quelqu'un ajoute une route vers la plage privée, le service entier redeviendrait joignable
+en contournant le port publié — et le pare-feu afficherait pourtant une configuration
+correcte. Le trou a été trouvé par le test, pas par relecture.
+
+### IPv4 seulement, et c'est délibéré
+
+Les adresses IPv6 des zones sont des adresses locales uniques. Les publier par redirection
+supposerait du NAT66, pratique déconseillée qui casse la traçabilité des connexions.
+Publier correctement un service en IPv6 demande un préfixe routé depuis l'extérieur, ce que
+la machine n'a pas aujourd'hui. Mieux vaut ne rien faire que faire quelque chose de bancal
+sur ce terrain.
+
+### Validation en deux temps
+
+Ce qui ne dépend pas de l'état de la machine — syntaxe, bornes de ports, protocole,
+doublons de port exposé, existence de la VM parmi celles déclarées — est vérifié **au
+chargement de la configuration**, avant qu'un bridge ne soit posé ou qu'une VM ne démarre.
+Le reste, qui a besoin des adresses attribuées, est vérifié à l'application du pare-feu.
+
+Deux publications sur le même port exposé sont refusées : le résultat dépendrait de l'ordre
+des règles, exactement le genre d'ambiguïté qui se découvre en production.
 
 ## Un piège IPv6 qui ne se voit pas
 

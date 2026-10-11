@@ -5,6 +5,8 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"syscall"
 )
 
 // copyImage recopie une image de micro-VM vers sa copie de travail.
@@ -37,6 +39,40 @@ func copyImage(src, dst string) error {
 	}
 
 	return copyFileGo(src, dst)
+}
+
+// sameFilesystem vérifie que deux chemins vivent sur le même système de
+// fichiers, condition des liens durs que jailer utilise.
+//
+// Le second chemin peut ne pas exister encore : on remonte alors au premier
+// parent existant, qui est ce qui compte pour le point de montage.
+func sameFilesystem(path, other string) error {
+	devOf := func(p string) (uint64, string, error) {
+		for {
+			var st syscall.Stat_t
+			if err := syscall.Stat(p, &st); err == nil {
+				return uint64(st.Dev), p, nil
+			}
+			parent := filepath.Dir(p)
+			if parent == p {
+				return 0, p, fmt.Errorf("aucun parent accessible pour %s", p)
+			}
+			p = parent
+		}
+	}
+
+	devA, usedA, err := devOf(path)
+	if err != nil {
+		return err
+	}
+	devB, usedB, err := devOf(other)
+	if err != nil {
+		return err
+	}
+	if devA != devB {
+		return fmt.Errorf("%s et %s sont sur deux systèmes de fichiers différents, alors que jailer installe les artefacts par liens durs. Placer la jail à côté des images, ou l'inverse", usedA, usedB)
+	}
+	return nil
 }
 
 func copyFileGo(src, dst string) error {

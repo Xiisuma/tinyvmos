@@ -451,7 +451,7 @@ Le blocage DNS seul ne tient pas face à des participants de CTF. Le pare-feu du
 - [ ] Tester chaque contournement soi-même avant l'événement, et documenter le résultat.
 
 ### 9.4 Exposition des services de l'événement
-- [ ] `web-evenement` accessible aux participants via le reverse proxy, publié sur l'IP principale du serveur par redirection de port.
+- [x] Mécanisme de publication en place : un port de VM est exposé sur l'interface de sortie par redirection. La règle d'autorisation porte `ct status dnat`, sans quoi un accès direct à l'adresse privée de la VM passerait aussi. IPv4 seulement, délibérément : publier une adresse locale unique supposerait du NAT66. Reste à écrire la configuration propre à l'événement.
 - [ ] VM DNS joignable depuis le LAN du routeur sur le port 53 (flux explicitement déclaré, unique exception entrante vers la zone Interne).
 - [ ] **Aucun autre port** exposé vers le LAN des participants.
 - [ ] Vérifier par scan complet depuis un poste participant : seuls les ports attendus répondent.

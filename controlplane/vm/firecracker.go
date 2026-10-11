@@ -222,6 +222,13 @@ func (f *Firecracker) Create(ctx context.Context, spec Spec) error {
 	if err := copyImage(srcImage, rootfs); err != nil {
 		return fmt.Errorf("vm %s : copie de l'image : %w", spec.Name, err)
 	}
+	// jailer installe les artefacts dans la jail par liens durs, qui exigent
+	// le même système de fichiers. Sans cette vérification, l'échec arrive
+	// bien plus loin, sous la forme d'un « Invalid argument » de jailer qui
+	// ne dit pas du tout ce qui se passe.
+	if err := sameFilesystem(rootfs, f.ChrootBaseDir); err != nil {
+		return fmt.Errorf("vm %s : %w", spec.Name, err)
+	}
 	if err := os.Chown(rootfs, f.uid, f.gid); err != nil {
 		return fmt.Errorf("vm %s : attribution de la copie de l'image à %s : %w", spec.Name, JailUser, err)
 	}
