@@ -81,7 +81,8 @@ command -v jq >/dev/null || die "jq requis pour ce test"
 
 [ -x "$DAEMON_BIN" ] || die "démon absent : lancer « cd controlplane && go build -o ../output/bin/tinyvmosd ./cmd/tinyvmosd »"
 
-id -u tinyvmos >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin tinyvmos
+# Aucun utilisateur systeme a creer : chaque VM recoit un uid numerique dans
+# une plage reservee, et jailer comme chown se contentent d un nombre.
 
 "${REPO_ROOT}/images/kernel/fetch-kernel.sh" >/dev/null 2>&1 || die "noyau invité indisponible"
 if [ ! -f "${IMAGES_OUT}/${SERVICE}.ext4" ]; then
@@ -140,9 +141,9 @@ log "=== confinement ==="
 
 FC_PID=$(pgrep -x firecracker | head -1)
 if [ -n "$FC_PID" ]; then
-    OWNER=$(stat -c '%U' "/proc/${FC_PID}" 2>/dev/null)
-    [ "$OWNER" = "tinyvmos" ]
-    check $? "Firecracker tourne en utilisateur tinyvmos, pas en root (obtenu ${OWNER})"
+    OWNER=$(stat -c '%u' "/proc/${FC_PID}" 2>/dev/null)
+    [ "$OWNER" -ge 60000 ] && [ "$OWNER" -le 60999 ]
+    check $? "Firecracker tourne sous une identité dédiée de la plage réservée (uid ${OWNER}), pas en root"
 
     grep -qE '^Seccomp:[[:space:]]*2' "/proc/${FC_PID}/status"
     check $? "filtre seccomp en mode strict"

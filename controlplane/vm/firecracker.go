@@ -7,9 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
-	"os/user"
 	"path/filepath"
-	"strconv"
 	"sync"
 	"time"
 
@@ -17,9 +15,16 @@ import (
 	"github.com/firecracker-microvm/firecracker-go-sdk/client/models"
 )
 
-// JailUser est l'utilisateur système sous lequel tourne chaque VM. Il n'a ni
-// shell ni dossier personnel : son seul rôle est de ne pas être root.
-const JailUser = "tinyvmos"
+// Il n'y a volontairement plus d'utilisateur partagé entre les VM.
+//
+// Chacune tourne sous son propre uid et son propre gid, attribués par le plan
+// de contrôle dans la plage IdentityMin-IdentityMax et persistés avec l'état.
+// Les partager voudrait dire qu'une évasion de Firecracker donne accès aux
+// images de travail, aux jails et aux sockets de toutes les autres VM.
+//
+// Ces identifiants n'ont pas d'entrée dans /etc/passwd, et n'en ont pas
+// besoin : jailer appelle setuid avec une valeur numérique, chown aussi, et
+// Firecracker confiné ne lit jamais la base des utilisateurs.
 
 // stopGrace est le temps laissé à une VM pour s'arrêter proprement avant que
 // le processus soit tué.
@@ -43,8 +48,6 @@ type Firecracker struct {
 
 	mu       sync.Mutex
 	machines map[string]*instance
-	uid      int
-	gid      int
 }
 
 type instance struct {
@@ -83,43 +86,27 @@ func NewFirecracker(runDir, chrootBaseDir string, log *slog.Logger) (*Firecracke
 		return nil, fmt.Errorf("binaire jailer introuvable dans le PATH : il est livré avec firecracker et c'est lui qui confine les VM (%w)", err)
 	}
 
-	if f.uid, f.gid, err = lookupJailUser(); err != nil {
-		return nil, err
-	}
-
 	for _, d := range []string{runDir, chrootBaseDir} {
 		if err := os.MkdirAll(d, 0o750); err != nil {
 			return nil, fmt.Errorf("création de %s : %w", d, err)
 		}
 	}
+
+	// Le dossier des exécutions est traversable par tous, mais pas listable :
+	// chaque VM doit pouvoir atteindre son propre sous-dossier, qui est en
+	// 0700, sans pouvoir découvrir quelles autres VM existent.
+	//
+	// Sans ce droit de traversée, une VM ne pourrait même pas ouvrir ses
+	// propres fichiers par leur chemin. Ça fonctionnerait quand même, puisque
+	// jailer installe les artefacts dans la jail en tant que root — mais la
+	// séparation reposerait alors sur l'inaccessibilité générale plutôt que
+	// sur la propriété des fichiers, et on ne saurait pas laquelle des deux
+	// protège réellement.
+	if err := os.Chmod(runDir, 0o711); err != nil {
+		return nil, fmt.Errorf("droits de %s : %w", runDir, err)
+	}
+
 	return f, nil
-}
-
-// JailUserIDs renvoie l'uid et le gid de l'utilisateur confine sous lequel
-// tournent les VM.
-//
-// Expose parce que le gestionnaire de reseau en a besoin : l'interface tap doit
-// appartenir a cet utilisateur, sinon Firecracker confine ne peut pas l'ouvrir.
-// Le paquet network ne peut pas importer vm, qui l'importe deja.
-func JailUserIDs() (int, int, error) {
-	return lookupJailUser()
-}
-
-func lookupJailUser() (int, int, error) {
-	u, err := user.Lookup(JailUser)
-	if err != nil {
-		return 0, 0, fmt.Errorf("utilisateur système %q absent : le créer avec useradd --system --no-create-home --shell /usr/sbin/nologin %s (%w)",
-			JailUser, JailUser, err)
-	}
-	uid, err := strconv.Atoi(u.Uid)
-	if err != nil {
-		return 0, 0, fmt.Errorf("uid de %s illisible : %w", JailUser, err)
-	}
-	gid, err := strconv.Atoi(u.Gid)
-	if err != nil {
-		return 0, 0, fmt.Errorf("gid de %s illisible : %w", JailUser, err)
-	}
-	return uid, gid, nil
 }
 
 func (f *Firecracker) vmRunDir(name string) string { return filepath.Join(f.RunDir, name) }
@@ -184,9 +171,14 @@ func (f *Firecracker) Create(ctx context.Context, spec Spec) error {
 	if err := os.MkdirAll(runDir, 0o750); err != nil {
 		return fmt.Errorf("vm %s : création de %s : %w", spec.Name, runDir, err)
 	}
-	// jailer tourne sous l'utilisateur dédié : il doit pouvoir écrire ici.
-	if err := os.Chown(runDir, f.uid, f.gid); err != nil {
-		return fmt.Errorf("vm %s : attribution de %s à %s : %w", spec.Name, runDir, JailUser, err)
+	// jailer tourne sous l'identité de cette VM : il doit pouvoir écrire ici.
+	// Le mode 0700 est délibéré : seule cette VM doit voir son dossier de
+	// travail, pas les autres.
+	if err := os.Chown(runDir, spec.UID, spec.GID); err != nil {
+		return fmt.Errorf("vm %s : attribution de %s à l'uid %d : %w", spec.Name, runDir, spec.UID, err)
+	}
+	if err := os.Chmod(runDir, 0o700); err != nil {
+		return fmt.Errorf("vm %s : droits de %s : %w", spec.Name, runDir, err)
 	}
 
 	// jailer installe les artefacts dans la jail par liens durs. Un lien dur
@@ -197,8 +189,8 @@ func (f *Firecracker) Create(ctx context.Context, spec Spec) error {
 	// La spécification d'origine reste celle enregistrée dans l'état : elle dit
 	// ce qui a été demandé, pas ce qui a été résolu.
 	resolved := spec
-	var err error
-	if resolved.KernelPath, err = filepath.EvalSymlinks(spec.KernelPath); err != nil {
+	srcKernel, err := filepath.EvalSymlinks(spec.KernelPath)
+	if err != nil {
 		return fmt.Errorf("vm %s : résolution du chemin du noyau %s : %w", spec.Name, spec.KernelPath, err)
 	}
 	srcImage, err := filepath.EvalSymlinks(spec.ImagePath)
@@ -222,15 +214,38 @@ func (f *Firecracker) Create(ctx context.Context, spec Spec) error {
 	if err := copyImage(srcImage, rootfs); err != nil {
 		return fmt.Errorf("vm %s : copie de l'image : %w", spec.Name, err)
 	}
-	// jailer installe les artefacts dans la jail par liens durs, qui exigent
-	// le même système de fichiers. Sans cette vérification, l'échec arrive
-	// bien plus loin, sous la forme d'un « Invalid argument » de jailer qui
-	// ne dit pas du tout ce qui se passe.
-	if err := sameFilesystem(rootfs, f.ChrootBaseDir); err != nil {
-		return fmt.Errorf("vm %s : %w", spec.Name, err)
+	// Le noyau est copié lui aussi, et au même endroit.
+	//
+	// jailer installe TOUS les artefacts dans la jail par liens durs : l'image
+	// comme le noyau. Laisser le noyau à sa place d'origine marche tant que le
+	// catalogue et la jail sont sur le même système de fichiers, et échoue
+	// sinon avec « invalid cross-device link ». En copiant les deux dans le
+	// dossier de travail de la VM, la seule contrainte restante est que ce
+	// dossier et la jail partagent leur système de fichiers — ce que les
+	// chemins par défaut garantissent.
+	kernel := filepath.Join(runDir, "vmlinux")
+	if err := copyImage(srcKernel, kernel); err != nil {
+		return fmt.Errorf("vm %s : copie du noyau : %w", spec.Name, err)
 	}
-	if err := os.Chown(rootfs, f.uid, f.gid); err != nil {
-		return fmt.Errorf("vm %s : attribution de la copie de l'image à %s : %w", spec.Name, JailUser, err)
+	if err := os.Chown(kernel, spec.UID, spec.GID); err != nil {
+		return fmt.Errorf("vm %s : attribution du noyau à l'uid %d : %w", spec.Name, spec.UID, err)
+	}
+	if err := os.Chmod(kernel, 0o600); err != nil {
+		return fmt.Errorf("vm %s : droits du noyau : %w", spec.Name, err)
+	}
+	resolved.KernelPath = kernel
+
+	// Vérification de ceinture : les deux artefacts et la jail doivent être
+	// sur le même système de fichiers. Sans ce contrôle, l'échec arrive bien
+	// plus loin, sous la forme d'un message de jailer qui ne dit pas ce qui
+	// se passe.
+	for _, artefact := range []string{rootfs, kernel} {
+		if err := sameFilesystem(artefact, f.ChrootBaseDir); err != nil {
+			return fmt.Errorf("vm %s : %w", spec.Name, err)
+		}
+	}
+	if err := os.Chown(rootfs, spec.UID, spec.GID); err != nil {
+		return fmt.Errorf("vm %s : attribution de la copie de l'image à l'uid %d : %w", spec.Name, spec.UID, err)
 	}
 	if err := os.Chmod(rootfs, 0o600); err != nil {
 		return fmt.Errorf("vm %s : droits de la copie de l'image : %w", spec.Name, err)
@@ -240,7 +255,7 @@ func (f *Firecracker) Create(ctx context.Context, spec Spec) error {
 	f.machines[spec.Name] = &instance{spec: resolved}
 	f.Log.Info("vm préparée",
 		"vm", spec.Name, "service", spec.Service, "zone", spec.Zone,
-		"noyau", resolved.KernelPath, "image", resolved.ImagePath)
+		"noyau", resolved.KernelPath, "image", resolved.ImagePath, "uid", spec.UID)
 	return nil
 }
 
@@ -277,12 +292,12 @@ func (f *Firecracker) Start(ctx context.Context, name string) error {
 	if err != nil {
 		return fmt.Errorf("vm %s : ouverture du journal de console : %w", name, err)
 	}
-	if err := console.Chown(f.uid, f.gid); err != nil {
+	if err := console.Chown(spec.UID, spec.GID); err != nil {
 		console.Close()
 		return fmt.Errorf("vm %s : attribution du journal de console : %w", name, err)
 	}
 
-	uid, gid := f.uid, f.gid
+	uid, gid := spec.UID, spec.GID
 	// Le SDK déréférence NumaNode sans vérifier : un pointeur nul le fait
 	// paniquer dans jail(). Nœud 0 par défaut.
 	numaNode := 0
@@ -444,9 +459,11 @@ func (f *Firecracker) Delete(ctx context.Context, name string) error {
 	// La copie de travail de l'image disparaît avec la VM : les images du
 	// catalogue sont jetables, les données durables vivent sur des volumes
 	// persistants séparés.
-	rootfs := filepath.Join(f.vmRunDir(name), "rootfs.ext4")
-	if err := os.Remove(rootfs); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("vm %s : suppression de la copie de l'image %s : %w", name, rootfs, err)
+	for _, artefact := range []string{"rootfs.ext4", "vmlinux"} {
+		chemin := filepath.Join(f.vmRunDir(name), artefact)
+		if err := os.Remove(chemin); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("vm %s : suppression de %s : %w", name, chemin, err)
+		}
 	}
 
 	f.Log.Info("vm supprimée", "vm", name)

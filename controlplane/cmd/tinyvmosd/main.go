@@ -64,8 +64,10 @@ func main() {
 		uplink    = flag.String("uplink", "", "interface de sortie vers l'extérieur. Vide, elle est déduite de la route par défaut")
 		reconcile = flag.Duration("reconcile-interval", reconcilepkg.DefaultInterval,
 			"délai entre deux passes de réconciliation. 0 désactive la réparation automatique, ce qui n'est pas recommandé")
-		runDir    = flag.String("run-dir", "/run/tinyvmos", "dossier des sockets et journaux de console")
-		jailDir   = flag.String("jail-dir", "", "racine des jails. Vide, un dossier jail/ à côté du fichier d'état, pour que les liens durs de jailer restent possibles")
+		runDir = flag.String("run-dir", "/var/lib/tinyvmos/run",
+			"dossier de travail des vm : sockets, journaux de console, copies d'image et de noyau")
+		jailDir = flag.String("jail-dir", "",
+			"racine des jails. Vide, un dossier jail/ à côté du dossier de travail, pour que les liens durs de jailer restent possibles")
 		statePth  = flag.String("state", "/var/lib/tinyvmos/state.json", "fichier d'état du démon")
 		logLevel  = flag.String("log-level", "info", "niveau de journalisation : debug, info, warn, error")
 		showVer   = flag.Bool("version", false, "affiche la version et quitte")
@@ -173,12 +175,16 @@ func run(log *slog.Logger, o runOptions) error {
 	}
 
 	// jailer installe les artefacts dans la jail par liens durs, qui exigent
-	// que la jail et les artefacts soient sur le même système de fichiers. La
-	// placer à côté du fichier d'état est le défaut le plus sûr ; un chemin
-	// explicite reste possible pour qui sait ce qu'il fait.
+	// que la jail et les artefacts soient sur le même système de fichiers.
+	//
+	// Les artefacts vivent dans le dossier de travail des vm, donc la jail est
+	// placée juste à côté : la contrainte est satisfaite par construction.
+	// Ni l'un ni l'autre ne doit être en tmpfs — une copie d'image par vm y
+	// consommerait de la mémoire vive, ce qui est exactement ce qu'il ne faut
+	// pas faire sur une machine modeste.
 	jailDir := o.jailDir
 	if jailDir == "" {
-		jailDir = filepath.Join(filepath.Dir(o.statePath), "jail")
+		jailDir = filepath.Join(filepath.Dir(o.runDir), "jail")
 	}
 
 	requests, err := parseVMRequests(o.vms)
@@ -223,13 +229,7 @@ func run(log *slog.Logger, o runOptions) error {
 	if err != nil {
 		return err
 	}
-	// L'interface tap doit appartenir à l'utilisateur confiné sous lequel
-	// tourne Firecracker, sinon il ne peut pas l'ouvrir.
-	jailUID, jailGID, err := vm.JailUserIDs()
-	if err != nil {
-		return err
-	}
-	netMgr := network.NewManager(log, uint32(jailUID), uint32(jailGID))
+	netMgr := network.NewManager(log)
 	firewall := network.NewFirewall(log, o.uplink, filepath.Join(o.runDir, "ruleset.nft"))
 
 	log.Info("démon démarré",
@@ -342,7 +342,16 @@ func run(log *slog.Logger, o runOptions) error {
 			return err
 		}
 
-		tap, err := netMgr.EnsureTap(z, r.Name)
+		// L'identité confinée est attribuée avant l'interface tap : c'est
+		// elle qui doit la posséder, sans quoi Firecracker ne pourra pas
+		// l'ouvrir.
+		identity, err := mgr.IdentityFor(r.Name)
+		if err != nil {
+			cleanupNetwork()
+			return err
+		}
+
+		tap, err := netMgr.EnsureTap(z, r.Name, uint32(identity), uint32(identity))
 		if err != nil {
 			cleanupNetwork()
 			return err
@@ -364,11 +373,14 @@ func run(log *slog.Logger, o runOptions) error {
 			IPv6:       lease.IPv6,
 			GatewayV6:  lease.GatewayV6,
 			Restart:    r.Restart,
+			UID:        identity,
+			GID:        identity,
 		}
 
 		log.Info("vm adressée",
 			"vm", r.Name, "zone", z.Name, "tap", tap,
-			"ipv4", lease.IPv4, "ipv6", lease.IPv6)
+			"ipv4", lease.IPv4, "ipv6", lease.IPv6,
+			"uid", identity)
 
 		if err := mgr.Ensure(ctx, spec); err != nil {
 			cleanupNetwork()
@@ -583,11 +595,11 @@ func printState(store *state.JSONStore) error {
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "NOM\tSERVICE\tZONE\tSTATUT\tPID\tRELANCES\tIPV4\tIPV6\tERREUR")
+	fmt.Fprintln(w, "NOM\tSERVICE\tZONE\tSTATUT\tUID\tPID\tRELANCES\tIPV4\tIPV6\tERREUR")
 	for _, rec := range snap.VMs {
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\t%d\t%s\t%s\t%s\n",
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\t%d\t%d\t%s\t%s\t%s\n",
 			rec.Spec.Name, rec.Spec.Service, rec.Spec.Zone,
-			rec.Status, rec.PID, rec.Restarts,
+			rec.Status, rec.Spec.UID, rec.PID, rec.Restarts,
 			rec.Spec.IP, rec.Spec.IPv6, rec.LastError)
 	}
 	return w.Flush()

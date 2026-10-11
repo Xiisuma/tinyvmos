@@ -48,6 +48,8 @@ func testSpec(t *testing.T, name string) Spec {
 	return Spec{
 		Name:       name,
 		Service:    "web-apache",
+		UID:        IdentityMin,
+		GID:        IdentityMin,
 		Zone:       "publique",
 		VCPU:       1,
 		MemMiB:     128,

@@ -83,7 +83,8 @@ start_daemon() {
 log "préparation"
 command -v jq >/dev/null || die "jq requis"
 [ -x "$DAEMON_BIN" ] || die "démon absent : cd controlplane && go build -o ../output/bin/tinyvmosd ./cmd/tinyvmosd"
-id -u tinyvmos >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin tinyvmos
+# Aucun utilisateur systeme a creer : chaque VM recoit un uid numerique dans
+# une plage reservee.
 
 "${REPO_ROOT}/images/kernel/fetch-kernel.sh" >/dev/null 2>&1 || die "noyau invité indisponible"
 
