@@ -70,6 +70,64 @@ func (m *Manager) persistLocked() error {
 	return m.store.Save(m.snap)
 }
 
+// verifyArtifactsLocked refuse de préparer une VM dont l'image ou le noyau ne
+// correspond pas à son empreinte retenue.
+//
+// Elle est appelée avant vmm.Create, donc avant que l'artefact ne soit copié
+// dans le dossier de travail de la VM : c'est le fichier du catalogue qui est
+// vérifié, celui qui serait modifié. Vérifier la copie n'aurait rien prouvé,
+// puisque c'est nous qui venons de la faire.
+//
+// Les deux artefacts sont vérifiés avant qu'aucune empreinte ne soit
+// enregistrée. Une VM dont l'image passe et dont le noyau échoue ne doit rien
+// laisser derrière elle, sans quoi la prochaine tentative accepterait l'image
+// sans la revérifier.
+//
+// Le verrou doit être tenu.
+func (m *Manager) verifyArtifactsLocked(spec Spec) error {
+	if m.snap.Artifacts == nil {
+		m.snap.Artifacts = map[string]Pin{}
+	}
+
+	now := m.clock()
+	fresh := map[string]Pin{}
+
+	for _, artefact := range []struct{ role, path string }{
+		{"image", spec.ImagePath},
+		{"noyau", spec.KernelPath},
+	} {
+		path, pin, isNew, err := verifyArtifact(m.snap.Artifacts, artefact.path, artefact.role, now)
+		if err != nil {
+			return fmt.Errorf("vm %s : %w", spec.Name, err)
+		}
+		if !isNew {
+			m.log.Debug("artefact vérifié",
+				"vm", spec.Name, "artefact", artefact.role,
+				"chemin", path, "empreinte", pin.SHA256)
+			continue
+		}
+		fresh[path] = pin
+
+		// La différence entre les deux cas compte : dans le premier, quelque
+		// chose d'indépendant confirme le fichier ; dans le second, on
+		// enregistre ce qui était là, et on le dit.
+		if pin.Source == PinSourceMetadata {
+			m.log.Info("empreinte d'artefact enregistrée, confirmée par les métadonnées de construction",
+				"vm", spec.Name, "artefact", artefact.role,
+				"chemin", path, "empreinte", pin.SHA256)
+		} else {
+			m.log.Warn("empreinte d'artefact enregistrée sans confirmation indépendante : aucune métadonnée de construction à côté du fichier",
+				"vm", spec.Name, "artefact", artefact.role,
+				"chemin", path, "empreinte", pin.SHA256)
+		}
+	}
+
+	for path, pin := range fresh {
+		m.snap.Artifacts[path] = pin
+	}
+	return nil
+}
+
 // Create enregistre une VM et la prépare auprès de l'hyperviseur.
 func (m *Manager) Create(ctx context.Context, spec Spec) error {
 	if err := spec.Validate(); err != nil {
@@ -81,6 +139,9 @@ func (m *Manager) Create(ctx context.Context, spec Spec) error {
 
 	if _, exists := m.snap.VMs[spec.Name]; exists {
 		return fmt.Errorf("vm %s déjà déclarée", spec.Name)
+	}
+	if err := m.verifyArtifactsLocked(spec); err != nil {
+		return err
 	}
 	if err := m.vmm.Create(ctx, spec); err != nil {
 		return err
@@ -111,6 +172,10 @@ func (m *Manager) Ensure(ctx context.Context, spec Spec) error {
 	}
 
 	m.mu.Lock()
+	if err := m.verifyArtifactsLocked(spec); err != nil {
+		m.mu.Unlock()
+		return err
+	}
 	rec, known := m.snap.VMs[spec.Name]
 	if known {
 		rec.Spec = spec

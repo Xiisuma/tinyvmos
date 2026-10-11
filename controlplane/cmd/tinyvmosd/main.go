@@ -567,6 +567,35 @@ func loadZones(path string) ([]network.Zone, error) {
 	return zones, nil
 }
 
+// trustArtifacts enregistre l'empreinte actuelle des artefacts indiqués.
+//
+// C'est l'échappatoire volontaire du dispositif d'intégrité : une image
+// reconstruite change d'empreinte, le démon refuse alors de démarrer, et il
+// faut qu'un humain confirme. Sans cette commande, la seule issue serait de
+// supprimer l'état, ce qui emporterait aussi les adresses et les identités.
+func trustArtifacts(log *slog.Logger, store *state.JSONStore, paths []string) error {
+	snap, err := store.Load()
+	if err != nil {
+		return err
+	}
+
+	now := time.Now()
+	for _, raw := range paths {
+		path, pin, err := vm.PinArtifact(snap, raw, now)
+		if err != nil {
+			return err
+		}
+		log.Info("empreinte acceptée", "chemin", path, "empreinte", pin.SHA256)
+		fmt.Printf("%s\n  %s\n", path, pin.SHA256)
+	}
+
+	if err := store.Save(snap); err != nil {
+		return err
+	}
+	fmt.Printf("\n%d empreinte(s) enregistrée(s) dans %s\n", len(paths), store.Path())
+	return nil
+}
+
 func printState(store *state.JSONStore) error {
 	snap, err := store.Load()
 	if err != nil {
@@ -582,6 +611,20 @@ func printState(store *state.JSONStore) error {
 		fmt.Fprintln(w, "ZONE\tBRIDGE\tIPV4\tIPV6")
 		for _, z := range snap.Zones {
 			fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", z.Name, z.BridgeName(), z.IPv4, z.IPv6)
+		}
+		if err := w.Flush(); err != nil {
+			return err
+		}
+		fmt.Println()
+	}
+
+	if len(snap.Artifacts) > 0 {
+		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(w, "ARTEFACT\tEMPREINTE\tORIGINE\tRETENUE LE")
+		for _, a := range vm.SortedPins(snap.Artifacts) {
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\n",
+				a.Path, a.Pin.SHA256, a.Pin.Source,
+				a.Pin.PinnedAt.Format(time.RFC3339))
 		}
 		if err := w.Flush(); err != nil {
 			return err
