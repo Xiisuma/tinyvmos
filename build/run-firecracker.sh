@@ -9,6 +9,12 @@
 # Deux modes :
 #   --jailer   lance via jailer : chroot, namespaces, cgroup, uid et gid
 #              dédiés, filtre seccomp. C'est le mode attendu en production.
+#
+# Note : ce script utilise un unique utilisateur système « tinyvmos ». C'est
+# acceptable ici parce qu'il ne lance qu'une VM à la fois, pour diagnostic. Le
+# démon, lui, attribue un uid et un gid distincts à CHAQUE vm : les partager
+# ferait qu'une évasion donne accès aux fichiers de toutes les autres. Voir
+# controlplane/vm/identity.go.
 #   sans       lance Firecracker directement. Pour diagnostic seulement.
 #
 # Usage :

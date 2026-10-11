@@ -81,6 +81,15 @@ type Spec struct {
 	// Restart demande au superviseur de relancer la VM si elle s'arrête sans
 	// qu'on le lui ait demandé.
 	Restart bool `json:"restart"`
+
+	// UID et GID sont l'identité confinée sous laquelle tourne cette VM.
+	//
+	// Chaque VM a la sienne. Les partager voudrait dire qu'une évasion donne
+	// accès aux images de travail, aux jails et aux sockets de toutes les
+	// autres. Elles sont attribuées par le plan de contrôle, comme les
+	// adresses, et persistées pour rester stables d'un démarrage à l'autre.
+	UID int `json:"uid"`
+	GID int `json:"gid"`
 }
 
 var nameRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?$`)
@@ -144,6 +153,12 @@ func (s Spec) Validate() error {
 		if addr.To4() != nil {
 			return fmt.Errorf("vm %s : %q est une adresse IPv4 dans le champ GatewayV6", s.Name, s.GatewayV6)
 		}
+	}
+	if err := ValidateIdentity(s.UID); err != nil {
+		return fmt.Errorf("vm %s : uid : %w", s.Name, err)
+	}
+	if err := ValidateIdentity(s.GID); err != nil {
+		return fmt.Errorf("vm %s : gid : %w", s.Name, err)
 	}
 	return nil
 }

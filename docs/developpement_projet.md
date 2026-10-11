@@ -142,7 +142,7 @@ La machine de développement (Ryzen 7 260, 15,29 Go de RAM, RTX 5050 8 Go) n'est
 ### 2.2 Interface VMM et implémentation Firecracker
 - [x] Interface `VMM` définie : `Create`, `Start`, `Stop`, `Delete`, `Metrics`, `ConsoleLogPath`, `Wait`. `Snapshot` reporté au lot où le stockage arrive.
 - [x] `firecracker.go` implémenté sur `firecracker-go-sdk` v1.0.0.
-- [x] Lancement systématique via `jailer`, utilisateur système `tinyvmos`, seccomp en mode strict, vérifié par test.
+- [x] Lancement systématique via `jailer`, **une identité confinée par VM** (uid et gid dédiés dans la plage réservée 60000-60999, persistés), seccomp en mode strict. Vérifié par test, y compris par une tentative de lecture croisée entre deux VM.
 - [x] Machine d'état explicite avec table de transitions : une transition absente de la table est refusée, pas tolérée.
 - [x] Relance automatique avec temporisation doublante de 1 s à 60 s, remise à zéro après 60 s de stabilité. Un arrêt demandé ne déclenche pas de relance.
 - [x] Tests unitaires avec `vm.FakeVMM` : machine d'état, supervision et temporisation exercées sans KVM ni Firecracker, donc aussi dans la CI.

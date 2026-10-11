@@ -17,28 +17,14 @@ import (
 // de commande à analyser, des erreurs typées, et rien à installer sur l'hôte.
 type Manager struct {
 	Log *slog.Logger
-
-	// TapOwner et TapGroup sont l'uid et le gid auxquels appartiennent les
-	// interfaces tap.
-	//
-	// Ce n'est pas un détail de confort. Le noyau n'autorise l'attachement à un
-	// tap qu'au propriétaire déclaré, ou à un processus doté de CAP_NET_ADMIN.
-	// Firecracker tourne confiné sous jailer, sans capacité : si le tap
-	// appartient à root, il répond « Operation not permitted » et la VM ne
-	// démarre pas. Il faut donc le donner à l'utilisateur confiné.
-	TapOwner uint32
-	TapGroup uint32
 }
 
 // NewManager renvoie un gestionnaire de réseau.
-//
-// tapOwner et tapGroup sont l'uid et le gid de l'utilisateur sous lequel
-// tournent les VM : c'est lui qui ouvrira les interfaces tap.
-func NewManager(log *slog.Logger, tapOwner, tapGroup uint32) *Manager {
+func NewManager(log *slog.Logger) *Manager {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Manager{Log: log, TapOwner: tapOwner, TapGroup: tapGroup}
+	return &Manager{Log: log}
 }
 
 // EnsureZone crée le bridge de la zone s'il manque, et pose son adressage.
@@ -269,8 +255,15 @@ func TapName(vmName string) string {
 
 // EnsureTap crée l'interface tap d'une VM et la rattache au bridge de sa zone.
 //
+// owner et group sont l'identité confinée de CETTE VM, et non une identité
+// partagée. Le noyau n'autorise l'attachement à un tap qu'à son propriétaire
+// déclaré, ou à un processus doté de CAP_NET_ADMIN ; Firecracker sous jailer
+// n'en a aucune. Donner le tap à l'identité de la VM qui va l'ouvrir est donc
+// nécessaire, et le réserver à elle seule évite qu'une VM puisse s'attacher à
+// l'interface d'une autre.
+//
 // Idempotent, comme EnsureZone.
-func (m *Manager) EnsureTap(z Zone, vmName string) (string, error) {
+func (m *Manager) EnsureTap(z Zone, vmName string, owner, group uint32) (string, error) {
 	tap := TapName(vmName)
 	br := z.BridgeName()
 
@@ -294,15 +287,15 @@ func (m *Manager) EnsureTap(z Zone, vmName string) (string, error) {
 			// Sans propriétaire explicite, le tap appartient à root et
 			// Firecracker, confiné sous jailer et sans CAP_NET_ADMIN, ne peut
 			// pas s'y attacher.
-			Owner: m.TapOwner,
-			Group: m.TapGroup,
+			Owner: owner,
+			Group: group,
 		}
 		if err := netlink.LinkAdd(dev); err != nil {
 			return "", fmt.Errorf("vm %s : création de %s : %w", vmName, tap, err)
 		}
 		m.Log.Info("interface tap créée",
 			"vm", vmName, "tap", tap, "zone", z.Name,
-			"propriétaire", m.TapOwner, "groupe", m.TapGroup)
+			"propriétaire", owner, "groupe", group)
 		if link, err = netlink.LinkByName(tap); err != nil {
 			return "", fmt.Errorf("vm %s : relecture de %s : %w", vmName, tap, err)
 		}

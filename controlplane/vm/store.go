@@ -40,6 +40,14 @@ type Snapshot struct {
 	// Zones est la liste des zones réseau en place.
 	Zones []network.Zone `json:"zones,omitempty"`
 
+	// Identities associe un nom de VM à son identifiant confiné, qui sert à la
+	// fois d'uid et de gid.
+	//
+	// Persisté pour que l'identité d'une VM reste la même d'un démarrage à
+	// l'autre : sinon les fichiers de travail de la passe précédente
+	// deviendraient illisibles pour elle.
+	Identities map[string]int `json:"identities,omitempty"`
+
 	// Alloc retient le préfixe IPv6 de l'installation, les indices de zone et
 	// les adresses attribuées.
 	//

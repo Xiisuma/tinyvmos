@@ -190,7 +190,8 @@ func (r *Reconciler) reconcileTaps(report *Report) {
 			continue
 		}
 
-		if _, err := r.Net.EnsureTap(zone, rec.Spec.Name); err != nil {
+		if _, err := r.Net.EnsureTap(zone, rec.Spec.Name,
+			uint32(rec.Spec.UID), uint32(rec.Spec.GID)); err != nil {
 			report.Problems = append(report.Problems,
 				fmt.Sprintf("interface %s non réparable : %v", tap, err))
 			continue

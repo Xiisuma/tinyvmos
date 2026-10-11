@@ -358,7 +358,54 @@ func (m *Manager) Delete(ctx context.Context, name string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.snap.VMs, name)
+	// L'identifiant est rendu, pour que la plage ne s'épuise pas au fil des
+	// créations et suppressions.
+	if m.snap.Identities != nil {
+		delete(m.snap.Identities, name)
+	}
 	return m.persistLocked()
+}
+
+// IdentityFor renvoie l'identifiant confiné d'une VM, en lui en attribuant un
+// si elle n'en a pas encore.
+//
+// Appelé avant la création de l'interface tap : c'est cette identité qui doit
+// posséder le tap, sans quoi Firecracker confiné ne pourra pas l'ouvrir.
+func (m *Manager) IdentityFor(name string) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.snap.Identities == nil {
+		m.snap.Identities = map[string]int{}
+	}
+	if id, ok := m.snap.Identities[name]; ok {
+		if err := ValidateIdentity(id); err != nil {
+			return 0, fmt.Errorf("vm %s : identité enregistrée invalide : %w", name, err)
+		}
+		return id, nil
+	}
+
+	id, err := AllocateIdentity(identitiesTaken(m.snap.Identities, name))
+	if err != nil {
+		return 0, err
+	}
+	m.snap.Identities[name] = id
+	if err := m.persistLocked(); err != nil {
+		return 0, err
+	}
+	m.log.Info("identité confinée attribuée", "vm", name, "uid", id, "gid", id)
+	return id, nil
+}
+
+// Identities renvoie une copie de la table des identités.
+func (m *Manager) Identities() map[string]int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make(map[string]int, len(m.snap.Identities))
+	for k, v := range m.snap.Identities {
+		out[k] = v
+	}
+	return out
 }
 
 // WithState donne un accès verrouillé à l'état et le persiste une seule fois

@@ -71,9 +71,42 @@ Le journal d'audit (ajout seul, chaîné par hachage) et les secrets (chiffrés)
 propres fichiers. Le journal d'audit ne peut pas vivre ici : le réécrire entièrement à
 chaque entrée détruirait la propriété recherchée.
 
+## Une identité confinée par VM
+
+Chaque VM tourne sous son propre uid et son propre gid, pris dans la plage réservée
+**60000-60999**, attribués et persistés comme les adresses IP.
+
+Les partager — ce que faisait la première version — voudrait dire qu'une VM échappée de
+Firecracker a les droits de **toutes les autres** : leurs images de travail, leurs jails,
+leurs sockets. L'isolation réseau tiendrait, celle du système de fichiers tomberait d'un
+coup. La documentation Firecracker recommande explicitement un identifiant par VM.
+
+**Aucun utilisateur système n'est créé**, et c'est volontaire. `jailer` appelle `setuid`
+avec une valeur numérique, `chown` aussi, et Firecracker confiné ne lit jamais
+`/etc/passwd`. Créer mille comptes pour mille VM polluerait le système pour rien, et
+chaque création serait une écriture de plus à faire échouer.
+
+Droits sur les fichiers :
+
+| Chemin | Mode | Pourquoi |
+|---|---|---|
+| `<run-dir>` | 0711 | Traversable, pas listable : une VM atteint son dossier, sans découvrir les autres |
+| `<run-dir>/<vm>` | 0700 | Seule cette VM y entre |
+| `<run-dir>/<vm>/rootfs.ext4` | 0600 | Son image de travail |
+| `<run-dir>/<vm>/vmlinux` | 0600 | Sa copie du noyau |
+
+Le 0711 du dossier parent n'est pas un détail. En 0750 root, une VM ne pouvait même pas
+traverser jusqu'à ses propres fichiers. Ça fonctionnait — `jailer` installe les artefacts
+en tant que root — mais la séparation reposait alors sur l'inaccessibilité générale plutôt
+que sur la propriété des fichiers, et on ne savait pas laquelle des deux protégeait.
+
+`tests/phase2d-identites.sh` le prouve en prenant l'identité d'une VM avec `setpriv` pour
+tenter de lire les fichiers d'une autre, et vérifie aussi qu'elle lit bien les siens.
+
 ## Règles qui ne se négocient pas
 
-- **Toute VM est lancée via `jailer`.** Jamais Firecracker en direct, même pour tester.
+- **Toute VM est lancée via `jailer`, sous sa propre identité.** Jamais Firecracker en
+  direct, jamais une identité partagée entre deux VM, même pour tester.
   Le mode direct existe dans `build/run-firecracker.sh`, pour le diagnostic, pas ici.
 - Le filtre seccomp n'est jamais désactivé : c'est la dernière barrière entre une VM
   compromise et l'hôte.
@@ -140,6 +173,22 @@ sudo pkill -9 -x firecracker     # la vm doit se relancer seule
 
 La forme `-vm clé=valeur` est provisoire : elle disparaîtra au profit de `tinyvmos.yaml`
 au lot C. Elle n'existe que pour exercer le démon de bout en bout dès maintenant.
+
+## Chemins : une seule contrainte, satisfaite par construction
+
+`jailer` installe dans la jail **tous** les artefacts par liens durs : l'image comme le
+noyau. Les liens durs exigent le même système de fichiers.
+
+Les deux sont donc copiés dans le dossier de travail de la VM, et la jail est placée juste
+à côté. La seule contrainte restante — dossier de travail et jail sur le même système de
+fichiers — est satisfaite par les chemins par défaut, et vérifiée explicitement avec un
+message clair si elle est violée par des chemins donnés à la main.
+
+Les défauts étaient d'ailleurs incohérents entre eux : `run-dir` valait `/run/tinyvmos`,
+en tmpfs, et la jail se plaçait à côté du fichier d'état, sur disque. Désormais
+`/var/lib/tinyvmos/run` et `/var/lib/tinyvmos/jail`. Garder des copies d'image en tmpfs
+aurait de toute façon consommé de la mémoire vive par VM, ce qu'il ne faut surtout pas
+faire sur une machine modeste.
 
 ## Liens durs de jailer : réglé
 
