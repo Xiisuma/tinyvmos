@@ -93,11 +93,89 @@ champ `Owner`. Le laisser à zéro ne veut donc pas dire « pas de propriétaire
 rien** : la politique du pare-feu reste « tout refuser » et seuls les flux déclarés passent.
 Sans routage en revanche, aucun flux déclaré entre deux zones ne pourrait fonctionner.
 
-## Ce que ce paquet ne fait pas encore
+## Pare-feu
 
-Le pare-feu. Les zones existent, sont adressées et routées — donc elles se parlent. C'est
-ce que le lot B2 viendra couper, avec une table nftables de famille `inet`, qui couvre les
-deux familles d'un seul jeu de règles.
+Tout trafic qui entre ou sort d'une zone est refusé, sauf les flux déclarés. Une seule
+table de famille `inet` couvre IPv4 et IPv6 : une règle sans son équivalent dans l'autre
+famille serait un trou qui ne se voit pas.
 
-Un point à ne pas oublier à ce moment-là : **ne jamais jeter l'ICMPv6 en bloc.** La
-découverte de voisins en dépend, et un `drop` global casse purement et simplement IPv6.
+### Les flux, et les deux zones fictives
+
+Un flux autorise un trafic d'une zone vers une autre. Deux zones fictives rendent le
+modèle uniforme : `internet` pour ce qui est derrière l'interface de sortie, `host` pour
+les services que la machine rend aux VM.
+
+Conséquence : « cette zone a une sortie Internet » n'est pas un drapeau sur la zone, c'est
+un flux déclaré comme les autres. La promesse « aucune donnée ne sort » se vérifie donc en
+lisant la liste des flux, pas en fouillant le code.
+
+Un accès **entrant** depuis Internet est refusé à la validation, avec un message qui dit
+pourquoi : ce n'est pas un flux entre zones mais une publication de service, qui demande
+une redirection vers une VM précise. Pas encore pris en charge — mieux vaut un refus clair
+qu'une règle acceptée sans effet.
+
+### Texte plutôt que netlink
+
+Le jeu de règles est engendré en texte puis appliqué par `nft -f`, et non construit par
+netlink comme le prévoyait le plan. Trois raisons :
+
+- **`nft -f` est atomique** : le fichier passe en entier ou pas du tout. Un pare-feu à
+  moitié appliqué serait pire que pas de pare-feu.
+- **Le résultat est lisible.** Sur une machine déployée, un opérateur doit pouvoir
+  constater ce qui est installé, sans outil et sans confiance aveugle. Même raisonnement
+  que pour l'état en JSON. Le jeu de règles est écrit dans `run-dir`, et `-print-ruleset`
+  l'affiche sans rien installer ni exiger de droits.
+- Construire à la main le bytecode des expressions nftables pour une politique à deux
+  familles est long et facile à rater d'un rien. Sur un composant de sécurité, la
+  lisibilité du résultat vaut plus que l'élégance du moyen.
+
+### Aucune chaîne en policy drop
+
+C'est le point le plus contre-intuitif, et il est volontaire.
+
+Une politique `drop` sur `forward` s'appliquerait à **tout** le trafic routé de la machine,
+y compris celui d'un conteneur ou d'un tunnel. Dans nftables, une politique de chaîne ne se
+laisse pas contredire par une autre table : notre table casserait le reste de la machine.
+Sur `input`, ce serait encore plus grave — elle couperait l'accès d'administration, SSH
+compris, dès le premier démarrage.
+
+Le refus passe donc par des règles qui **nomment nos interfaces** :
+
+```
+iifname @zones counter drop
+oifname @zones counter drop
+```
+
+La garantie est la même — un paquet qui entre ou sort d'une zone sans règle l'autorisant
+est jeté, et un `drop` ne se laisse pas annuler par une autre table — mais un paquet qui ne
+concerne aucune zone traverse la chaîne sans être regardé. Deux tests gardent cette
+propriété : l'absence de `policy drop`, et la survie d'une table nftables étrangère à
+l'application comme au retrait.
+
+### ICMP, à ne pas jeter sans réfléchir
+
+- **ICMPv6 de découverte de voisins** : accepté explicitement. Un `drop` global casse
+  purement et simplement IPv6, la résolution d'adresse en dépendant.
+- **ICMP de découverte du MTU** (`destination-unreachable`, `time-exceeded`,
+  `parameter-problem`) : accepté. Le jeter produit des connexions qui s'établissent puis se
+  figent, symptôme très coûteux à diagnostiquer.
+
+Les refus sont journalisés à débit limité : un refus doit se voir sans pouvoir remplir le
+disque.
+
+### Traduction d'adresses
+
+Seules les zones ayant un flux déclaré vers `internet` ont une entrée de traduction. Une
+zone sans ce flux n'en a pas : même si une route existait, ses paquets sortiraient avec une
+adresse privée et ne reviendraient jamais. Deux barrières valent mieux qu'une pour une
+promesse du genre « aucune donnée ne sort ».
+
+## Un piège IPv6 qui ne se voit pas
+
+Le routage IPv6 se règle **par interface**. Une interface créée après l'écriture de
+`net.ipv6.conf.all.forwarding` hérite de `default`, pas de `all`.
+
+Conséquence observée : le routage IPv6 entre zones ne fonctionnait pas alors que l'IPv4
+fonctionnait. Une panne dissymétrique de ce genre coûte cher à diagnostiquer, parce que
+tout semble correct. Le réglage est donc posé sur chaque bridge au moment de sa création,
+et `default/forwarding` est écrit en plus.
