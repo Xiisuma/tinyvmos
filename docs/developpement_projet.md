@@ -167,7 +167,7 @@ La machine de développement (Ryzen 7 260, 15,29 Go de RAM, RTX 5050 8 Go) n'est
 - [x] Politique **tout refuser** entre zones, dans les deux sens, par des règles nommant les interfaces de zone. **Aucune chaîne n'est en `policy drop`** : ce serait casser le trafic routé des autres outils de la machine et, sur `input`, couper l'accès d'administration. La garantie est identique, l'effet de bord nul.
 - [x] Chaque flux est déclaré (source, destination, protocole, ports) et traduit en règle. Deux zones fictives, `internet` et `host`, rendent le modèle uniforme : une sortie Internet est un flux comme un autre, pas un drapeau sur la zone.
 - [x] Vérifié par test : une zone sans flux déclaré ne joint ni les autres zones, ni l'hôte, ni Internet, dans les deux familles. Et seules les zones ayant une sortie déclarée ont une traduction d'adresses, ce qui fait une seconde barrière.
-- [x] La table est remise à zéro puis réécrite à chaque application : toute retouche manuelle est écrasée. Seule la table `tinyvmos` est touchée, un test vérifie qu'une table étrangère survit.
+- [x] La table est remise à zéro puis réécrite à chaque application, et la réconciliation constate toute retouche pour la défaire. Seule la table `tinyvmos` est touchée, un test vérifie qu'une table étrangère survit.
 
 ### 2.5 VM DHCP et DNS interne
 - [ ] Image `images/dhcp-dns/` basée sur dnsmasq (ou Unbound + Kea si la séparation est préférée).
@@ -178,7 +178,7 @@ La machine de développement (Ryzen 7 260, 15,29 Go de RAM, RTX 5050 8 Go) n'est
 ### 2.6 Configuration déclarative et réconciliation
 - [ ] Schéma `tinyvmos.yaml` : VM, zones, flux, volumes, droits, images.
 - [ ] Validation stricte du schéma avec messages d'erreur exploitables.
-- [ ] Boucle de réconciliation : comparer l'état voulu et l'état réel, appliquer l'écart, journaliser chaque action.
+- [x] Boucle de réconciliation en place (`controlplane/reconcile/`), toutes les dix secondes par défaut. Elle rétablit un pare-feu détruit par un tiers, recrée un bridge de zone supprimé, et signale ce qu'elle ne peut pas réparer sans décision humaine. Détection par règle témoin plutôt que réécriture systématique : réappliquer à chaque passe remettrait tous les compteurs à zéro.
 - [ ] Mode `--dry-run` qui affiche le plan sans l'appliquer.
 
 ### 2.7 API

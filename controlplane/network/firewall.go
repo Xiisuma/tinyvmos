@@ -32,6 +32,24 @@ type Firewall struct {
 	// RulesetPath est l'endroit où le jeu de règles produit est écrit, pour
 	// qu'un opérateur puisse lire exactement ce qui a été installé.
 	RulesetPath string
+
+	// applied retient ce qui a réellement été installé, pour que Verify
+	// puisse constater une dérive.
+	applied applied
+
+	// pendingFingerprint est l'empreinte insérée dans la règle témoin pendant
+	// la seconde passe de génération.
+	pendingFingerprint string
+
+	// lastEmbedded est la dernière empreinte réellement insérée dans la règle
+	// témoin.
+	//
+	// Elle doit être retenue séparément : l'empreinte porte sur le jeu de
+	// règles SANS la règle témoin, puisqu'elle y est ensuite insérée. La
+	// recalculer sur le texte final donnerait une autre valeur, et la
+	// comparaison échouerait à chaque passe — le pare-feu serait réécrit en
+	// boucle et tous ses compteurs remis à zéro.
+	lastEmbedded string
 }
 
 // NewFirewall renvoie un pare-feu.
@@ -111,6 +129,21 @@ func (p Policy) egressZones() []Zone {
 //     composant de sécurité, la lisibilité du résultat vaut plus que l'élégance
 //     du moyen.
 func (f *Firewall) Ruleset(p Policy) (string, error) {
+	// L'empreinte porte sur la politique, pas sur le texte engendré : sinon
+	// elle dépendrait d'elle-même. Elle est donc calculée sur un premier jet
+	// sans règle témoin, puis insérée dans le jet définitif.
+	f.pendingFingerprint = ""
+	plain, err := f.ruleset(p)
+	if err != nil {
+		return "", err
+	}
+	f.pendingFingerprint = fingerprintOf(plain)
+	f.lastEmbedded = f.pendingFingerprint
+	defer func() { f.pendingFingerprint = "" }()
+	return f.ruleset(p)
+}
+
+func (f *Firewall) ruleset(p Policy) (string, error) {
 	if err := p.Validate(); err != nil {
 		return "", err
 	}
@@ -185,6 +218,12 @@ func (f *Firewall) writeForwardChain(w func(string, ...any), p Policy, uplink st
 	w("")
 	w("\t\t# Retours des connexions deja autorisees.")
 	w("\t\tct state established,related accept")
+	w("")
+	w("\t\t# Regle temoin. Elle ne rend aucun verdict : elle sert a reconnaitre")
+	w("\t\t# cette table et la version de politique qui y est posee. Si le")
+	w("\t\t# pare-feu est vide par autre chose, elle disparait et la")
+	w("\t\t# reconciliation s en apercoit.")
+	w("\t\tcounter comment \"%s%s\"", fingerprintPrefix, f.pendingFingerprint)
 	w("")
 	w("\t\t# ICMPv6 de decouverte de voisins. A NE JAMAIS jeter en bloc : sans")
 	w("\t\t# ces messages, IPv6 ne fonctionne pas du tout.")
@@ -464,6 +503,8 @@ func (f *Firewall) Apply(p Policy) error {
 		return fmt.Errorf("application du pare-feu : %w", err)
 	}
 
+	f.rememberApplied(ruleset)
+
 	f.Log.Info("pare-feu applique",
 		"zones", len(p.Zones), "flux", len(p.Flows),
 		"publications", len(p.Publications), "regles", f.RulesetPath)
@@ -487,6 +528,7 @@ func (f *Firewall) Flush() error {
 	if err := runNft(ruleset, false); err != nil {
 		return fmt.Errorf("retrait du pare-feu : %w", err)
 	}
+	f.forgetApplied()
 	f.Log.Info("pare-feu retire", "table", TableName)
 	return nil
 }

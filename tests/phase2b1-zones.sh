@@ -139,16 +139,16 @@ for b in br-t2b1-pub br-t2b1-int; do
     check $? "le bridge $b existe"
 done
 
-ip -4 addr show br-t2b1-pub | grep -q '10.42.97.1/24'
+texte_contient "$(ip -4 addr show br-t2b1-pub)" '10.42.97.1/24'
 check $? "le bridge publique porte la passerelle IPv4 10.42.97.1/24"
 
-ip -6 addr show br-t2b1-pub | grep -qE 'inet6 fd[0-9a-f]{2}:'
+grep -qE 'inet6 fd[0-9a-f]{2}:' <<< "$(ip -6 addr show br-t2b1-pub)"
 check $? "le bridge publique porte une adresse IPv6 locale unique"
 
-ip link show tap-web1 | grep -q 'master br-t2b1-pub'
+texte_contient "$(ip link show tap-web1)" 'master br-t2b1-pub'
 check $? "tap-web1 est rattachée au bridge de sa zone"
 
-ip link show tap-web2 | grep -q 'master br-t2b1-int'
+texte_contient "$(ip link show tap-web2)" 'master br-t2b1-int'
 check $? "tap-web2 est rattachée au bridge de son autre zone"
 
 [ "$(cat /proc/sys/net/ipv4/ip_forward)" = "1" ]
@@ -167,10 +167,10 @@ printf '\n'
 log "=== adressage IPv6 ==="
 
 ULA=$(jq -r '.alloc.ula_prefix' "$STATE_FILE")
-printf '%s' "$ULA" | grep -qE '^fd[0-9a-f]{2}:'
+grep -qE '^fd[0-9a-f]{2}:' <<< "$ULA"
 check $? "le préfixe de l'installation est bien un préfixe local unique (${ULA})"
 
-printf '%s' "$ULA" | grep -q '/48$'
+grep -q '/48$' <<< "$ULA"
 check $? "le préfixe de l'installation est un /48"
 
 V6_WEB1=$(jq -r '.alloc.leases.web1.ipv6' "$STATE_FILE")
@@ -179,7 +179,7 @@ check $? "web1 a reçu une adresse IPv6 (${V6_WEB1})"
 
 # L'identifiant IPv6 reprend le dernier octet de l'IPv4 : les deux adresses
 # d'une VM se lisent du même coup d'œil.
-printf '%s' "$V6_WEB1" | grep -q '::2/64$'
+grep -q '::2/64$' <<< "$V6_WEB1"
 check $? "l'IPv6 de web1 finit en ::2, comme son IPv4 en .2"
 
 V6_ADDR=${V6_WEB1%/*}
@@ -241,7 +241,7 @@ expect_refusal() {
     local motif="$1" libelle="$2"; shift 2
     local out
     out=$("$DAEMON_BIN" -state "${TEST_RUN}/jetable.json" "$@" 2>&1 || true)
-    if printf '%s' "$out" | grep -q "$motif"; then
+    if grep -q -- "$motif" <<< "$out"; then
         check 0 "$libelle"
     else
         check 1 "$libelle"

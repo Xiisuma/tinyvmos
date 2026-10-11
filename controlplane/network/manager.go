@@ -194,6 +194,23 @@ func (m *Manager) checkNoConflictingRoute(z Zone) error {
 	return nil
 }
 
+// LinkExists indique si une interface réseau est présente sur l'hôte.
+func (m *Manager) LinkExists(name string) (bool, error) {
+	if _, err := netlink.LinkByName(name); err != nil {
+		var notFound netlink.LinkNotFoundError
+		if errors.As(err, &notFound) {
+			return false, nil
+		}
+		return false, fmt.Errorf("lecture de l'interface %s : %w", name, err)
+	}
+	return true, nil
+}
+
+// ZoneExists indique si le bridge d'une zone est présent.
+func (m *Manager) ZoneExists(z Zone) (bool, error) {
+	return m.LinkExists(z.BridgeName())
+}
+
 // RemoveZone retire le bridge d'une zone, à condition qu'aucune interface ne
 // lui soit encore rattachée.
 func (m *Manager) RemoveZone(z Zone) error {

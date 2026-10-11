@@ -159,10 +159,10 @@ fi
 grep -q 'service publié' "$DAEMON_LOG"
 check $? "le démon a journalisé la publication"
 
-nft list table inet tinyvmos | grep -q 'chain prerouting'
+nft_contient 'chain prerouting'
 check $? "la chaîne de redirection est en place"
 
-nft list table inet tinyvmos | grep -q "10.42.92.2:80"
+nft_contient '10.42.92.2:80'
 check $? "la redirection vise bien l'adresse de la vm"
 
 # ------------------------------------------- Le service est joignable
@@ -178,7 +178,7 @@ else
     nft list table inet tinyvmos >&2
 fi
 
-dehors curl -fsS --max-time 3 "http://${HOST_EXT}:${HOST_PORT}/" | grep -q 'web-apache'
+texte_contient "$(dehors curl -fsS --max-time 3 "http://${HOST_EXT}:${HOST_PORT}/")" 'web-apache'
 check $? "la page servie est bien celle de la vm, pas celle d'un service de l'hôte"
 
 # ----------------------------------- Rien d'autre n'est joignable
@@ -206,7 +206,7 @@ expect_refusal() {
     out=$("$DAEMON_BIN" -state "${TEST_RUN}/jetable.json" -zones "$ZONES_FILE" \
         -publications "$fichier" -uplink "$UPLINK" \
         -vm "name=${VM},service=${SERVICE},zone=${ZONE}" 2>&1 || true)
-    if printf '%s' "$out" | grep -q "$motif"; then
+    if grep -q -- "$motif" <<< "$out"; then
         check 0 "$libelle"
     else
         check 1 "$libelle"

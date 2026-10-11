@@ -43,6 +43,49 @@ need_root() {
     [ "$(id -u)" -eq 0 ] || die "ce script doit être lancé en root (chroot et création de périphériques). Relancer avec sudo."
 }
 
+# texte_contient cherche un motif dans un texte, sans tube.
+#
+# « commande | grep -q motif » est un piège sous « set -o pipefail » : grep -q
+# ferme le tube dès qu'il trouve, le producteur reçoit SIGPIPE et sort en code
+# non nul, ce qui fait échouer tout le pipeline alors que le motif était bien
+# présent. Le résultat dépend alors de l'ordonnancement : une vérification qui
+# passe une fois sur deux ne prouve rien.
+texte_contient() {
+    local texte="$1" motif="$2"
+    case "$texte" in
+        *"$motif"*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# nft_contient cherche un motif dans la table nftables de TinyVMOS.
+# Renvoie 2 si la table n'existe pas, pour distinguer « absent » de « motif
+# introuvable ».
+nft_contient() {
+    local motif="$1" sortie
+    sortie=$(nft list table inet "${NFT_TABLE:-tinyvmos}" 2>/dev/null) || return 2
+    texte_contient "$sortie" "$motif"
+}
+
+# nft_correspond cherche une EXPRESSION REGULIERE dans la table nftables.
+#
+# Distinct de nft_contient, qui cherche une chaîne littérale. Confondre les
+# deux donne une vérification qui ne peut pas réussir : « counter.*drop » n'est
+# jamais présent mot pour mot. L'entrée est passée par here-string, donc sans
+# producteur à qui envoyer un SIGPIPE.
+nft_correspond() {
+    local motif="$1" sortie
+    sortie=$(nft list table inet "${NFT_TABLE:-tinyvmos}" 2>/dev/null) || return 2
+    grep -qE -- "$motif" <<< "$sortie"
+}
+
+# fichier_contient cherche un motif dans un fichier, sans tube.
+fichier_contient() {
+    local fichier="$1" motif="$2"
+    [ -f "$fichier" ] || return 2
+    grep -q -- "$motif" "$fichier"
+}
+
 # Télécharge une URL dans le cache et vérifie son empreinte.
 # Un fichier déjà présent et valide n'est pas retéléchargé.
 fetch_verified() {
