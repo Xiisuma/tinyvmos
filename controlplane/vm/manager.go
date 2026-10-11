@@ -96,6 +96,47 @@ func (m *Manager) Create(ctx context.Context, spec Spec) error {
 	return m.persistLocked()
 }
 
+// Ensure déclare une VM si elle est inconnue, ou reprend celle que l'état
+// connaît déjà, et la prépare auprès de l'hyperviseur.
+//
+// C'est le point d'entrée au démarrage du démon. Create ne suffit pas : après
+// un redémarrage, l'état contient la VM mais l'hyperviseur du nouveau processus
+// ne la connaît pas, et Start échouerait sur « vm inconnue ».
+//
+// Un statut resté à running vient forcément d'un démon tué sans arrêt propre :
+// rien ne tourne plus, et le remettre à stopped est la seule lecture honnête.
+func (m *Manager) Ensure(ctx context.Context, spec Spec) error {
+	if err := spec.Validate(); err != nil {
+		return err
+	}
+
+	m.mu.Lock()
+	rec, known := m.snap.VMs[spec.Name]
+	if known {
+		rec.Spec = spec
+		if rec.Status == StatusRunning || rec.Status == StatusStarting || rec.Status == StatusStopping {
+			m.log.Info("vm reprise d'un démon précédent, statut remis à l'arrêt",
+				"vm", spec.Name, "ancien_statut", rec.Status)
+			rec.Status = StatusStopped
+			rec.PID = 0
+		}
+		rec.UpdatedAt = m.clock()
+	}
+	m.mu.Unlock()
+
+	if !known {
+		return m.Create(ctx, spec)
+	}
+
+	if err := m.vmm.Create(ctx, spec); err != nil {
+		return err
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.persistLocked()
+}
+
 // Start démarre une VM et met en place sa supervision.
 func (m *Manager) Start(ctx context.Context, name string) error {
 	m.mu.Lock()
@@ -318,6 +359,28 @@ func (m *Manager) Delete(ctx context.Context, name string) error {
 	defer m.mu.Unlock()
 	delete(m.snap.VMs, name)
 	return m.persistLocked()
+}
+
+// WithState donne un accès verrouillé à l'état et le persiste une seule fois
+// si la fonction réussit.
+//
+// C'est le point d'entrée pour tout ce qui vit dans l'état sans être une VM :
+// les zones et les attributions d'adresses. Une écriture par appel, jamais une
+// par élément modifié — c'est la règle qui rend le magasin JSON tenable.
+func (m *Manager) WithState(fn func(*Snapshot) error) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := fn(m.snap); err != nil {
+		return err
+	}
+	return m.persistLocked()
+}
+
+// ReadState donne un accès verrouillé à l'état en lecture seule.
+func (m *Manager) ReadState(fn func(*Snapshot)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	fn(m.snap)
 }
 
 // Get renvoie une copie de l'état d'une VM.

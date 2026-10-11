@@ -23,13 +23,15 @@ le client, il n'y a que l'API.
 
 ## État d'avancement
 
-Phase 2, lot A : interface `VMM`, implémentation Firecracker, machine d'état, supervision
-et magasin d'état. Pas encore d'API : le démon prend ses VM sur la ligne de commande.
+Phase 2, lots A et B1 : interface `VMM`, implémentation Firecracker, machine d'état,
+supervision, magasin d'état, zones réseau et adressage double pile. Pas encore d'API ni de
+pare-feu : le démon prend ses zones et ses VM sur la ligne de commande.
 
 | Lot | Contenu | État |
 |---|---|---|
 | A | `VMM`, Firecracker sous `jailer`, machine d'état, relance auto, magasin d'état | fait |
-| B | Zones, bridges et tap par netlink, nftables « tout refuser » | à faire |
+| B1 | Zones, bridges et tap par netlink, adressage double pile | fait |
+| B2 | Pare-feu nftables « tout refuser » et flux déclarés | à faire |
 | C | Schéma `tinyvmos.yaml`, validation, réconciliation, `--dry-run` | à faire |
 | D | `openapi.yaml`, REST et WebSocket, TLS, authentification par appareil, rôles | à faire |
 | E | Journal d'audit chaîné par hachage | à faire |
@@ -41,6 +43,7 @@ et magasin d'état. Pas encore d'API : le démon prend ses VM sur la ligne de co
 | Paquet | Rôle |
 |---|---|
 | `vm/` | Interface `VMM`, implémentation Firecracker, machine d'état, superviseur |
+| `network/` | Zones, bridges, interfaces tap, adressage IPv4 et IPv6 |
 | `state/` | Magasin d'état : fichier JSON réécrit de façon atomique |
 | `cmd/tinyvmosd/` | Le démon |
 

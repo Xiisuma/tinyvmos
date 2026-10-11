@@ -141,25 +141,42 @@ depend() {
 }
 
 start() {
-	local ip gw
+	local ip gw ip6 gw6
 	for arg in $(cat /proc/cmdline); do
 		case "$arg" in
-			tinyvmos.ip=*) ip="${arg#tinyvmos.ip=}" ;;
-			tinyvmos.gw=*) gw="${arg#tinyvmos.gw=}" ;;
+			tinyvmos.ip=*)  ip="${arg#tinyvmos.ip=}"   ;;
+			tinyvmos.gw=*)  gw="${arg#tinyvmos.gw=}"   ;;
+			tinyvmos.ip6=*) ip6="${arg#tinyvmos.ip6=}" ;;
+			tinyvmos.gw6=*) gw6="${arg#tinyvmos.gw6=}" ;;
 		esac
 	done
 
-	[ -n "$ip" ] || return 0
+	[ -n "$ip" ] || [ -n "$ip6" ] || return 0
 
-	ebegin "Adressage reseau depuis la ligne de commande du noyau ($ip)"
+	ebegin "Adressage reseau depuis la ligne de commande du noyau ($ip $ip6)"
 	{
 		echo "auto lo"
 		echo "iface lo inet loopback"
 		echo ""
-		echo "auto eth0"
-		echo "iface eth0 inet static"
-		echo "	address $ip"
-		[ -n "$gw" ] && echo "	gateway $gw"
+		if [ -n "$ip" ]; then
+			echo "auto eth0"
+			echo "iface eth0 inet static"
+			echo "	address $ip"
+			[ -n "$gw" ] && echo "	gateway $gw"
+			echo ""
+		fi
+		# Le parametre ip= du noyau ne traite que l IPv4 : la seconde famille
+		# est posee ici, a partir de tinyvmos.ip6.
+		if [ -n "$ip6" ]; then
+			echo "auto eth0"
+			echo "iface eth0 inet6 static"
+			echo "	address $ip6"
+			[ -n "$gw6" ] && echo "	gateway $gw6"
+			# L invite ne doit pas se laisser reconfigurer par une annonce de
+			# routeur : sa passerelle est celle que le plan de controle impose.
+			echo "	accept_ra 0"
+			echo "	autoconf 0"
+		fi
 	} > /etc/network/interfaces
 	eend 0
 }

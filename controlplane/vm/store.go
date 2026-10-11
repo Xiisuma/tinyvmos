@@ -1,6 +1,10 @@
 package vm
 
-import "time"
+import (
+	"time"
+
+	"github.com/Xiisuma/tinyvmos/controlplane/network"
+)
 
 // SchemaVersion est la version du schéma du magasin d'état. Elle est écrite
 // dans le fichier pour qu'une version ultérieure du démon sache migrer un état
@@ -32,6 +36,18 @@ type Record struct {
 type Snapshot struct {
 	Version int                `json:"version"`
 	VMs     map[string]*Record `json:"vms"`
+
+	// Zones est la liste des zones réseau en place.
+	Zones []network.Zone `json:"zones,omitempty"`
+
+	// Alloc retient le préfixe IPv6 de l'installation, les indices de zone et
+	// les adresses attribuées.
+	//
+	// Ces attributions sont enregistrées, pas recalculées : une adresse
+	// dérivée d'un hachage du nom entrerait en collision tôt ou tard, et sans
+	// bruit. Une VM doit aussi retrouver la même adresse après un redémarrage
+	// du démon, sinon les règles de pare-feu ne voudraient plus rien dire.
+	Alloc *network.Allocation `json:"alloc,omitempty"`
 }
 
 // NewSnapshot renvoie un état vide à la version courante du schéma.

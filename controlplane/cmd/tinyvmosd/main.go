@@ -1,18 +1,21 @@
 // Commande tinyvmosd : le démon TinyVMOS.
 //
-// À ce stade (Phase 2, lot A), le démon ne sert pas encore d'API : il prend les
-// VM à faire tourner sur sa ligne de commande, les supervise, et les arrête
-// proprement à l'extinction. L'API REST et WebSocket, la configuration
-// déclarative tinyvmos.yaml et les zones réseau arrivent dans les lots suivants.
+// À ce stade (Phase 2, lots A et B1), le démon ne sert pas encore d'API : il
+// prend ses zones et ses VM sur la ligne de commande, pose le réseau, démarre
+// les VM, les supervise, et nettoie tout à l'extinction. L'API REST et
+// WebSocket, la configuration déclarative tinyvmos.yaml et le pare-feu arrivent
+// dans les lots suivants.
 //
 // Ce qui est déjà vrai et ne changera pas : toute VM est lancée via jailer,
-// l'état constaté est écrit dans un fichier JSON de façon atomique, et une VM
-// qui s'arrête sans qu'on le lui ait demandé est relancée avec une
-// temporisation croissante.
+// l'état constaté est écrit dans un fichier JSON de façon atomique, une VM qui
+// s'arrête sans qu'on le lui ait demandé est relancée avec une temporisation
+// croissante, et chaque VM reçoit son adressage des deux familles depuis
+// l'attribution persistée de sa zone.
 package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -25,6 +28,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/Xiisuma/tinyvmos/controlplane/network"
 	"github.com/Xiisuma/tinyvmos/controlplane/state"
 	"github.com/Xiisuma/tinyvmos/controlplane/vm"
 )
@@ -32,23 +36,40 @@ import (
 // version est renseignée à la compilation par -ldflags.
 var version = "dev"
 
-type vmFlags []string
+type repeatedFlag []string
 
-func (v *vmFlags) String() string     { return strings.Join(*v, " ") }
-func (v *vmFlags) Set(s string) error { *v = append(*v, s); return nil }
+func (v *repeatedFlag) String() string     { return strings.Join(*v, " ") }
+func (v *repeatedFlag) Set(s string) error { *v = append(*v, s); return nil }
+
+// vmRequest est une VM demandée sur la ligne de commande, avant que son
+// adressage ne lui soit attribué.
+type vmRequest struct {
+	Name    string
+	Service string
+	Zone    string
+	VCPU    int64
+	MemMiB  int64
+	Restart bool
+	Kernel  string
+	Image   string
+}
 
 func main() {
 	var (
-		specs    vmFlags
-		runDir   = flag.String("run-dir", "/run/tinyvmos", "dossier des sockets et journaux de console")
-		jailDir  = flag.String("jail-dir", "/srv/jailer", "racine sous laquelle jailer construit les jails")
-		statePth = flag.String("state", "/var/lib/tinyvmos/state.json", "fichier d'état du démon")
-		logLevel = flag.String("log-level", "info", "niveau de journalisation : debug, info, warn, error")
-		showVer  = flag.Bool("version", false, "affiche la version et quitte")
-		listOnly = flag.Bool("list", false, "affiche l'état enregistré et quitte")
+		vms       repeatedFlag
+		zonesPath = flag.String("zones", "", "fichier JSON décrivant les zones. Vide, les cinq zones d'exemple sont utilisées")
+		runDir    = flag.String("run-dir", "/run/tinyvmos", "dossier des sockets et journaux de console")
+		jailDir   = flag.String("jail-dir", "", "racine des jails. Vide, un dossier jail/ à côté du fichier d'état, pour que les liens durs de jailer restent possibles")
+		statePth  = flag.String("state", "/var/lib/tinyvmos/state.json", "fichier d'état du démon")
+		logLevel  = flag.String("log-level", "info", "niveau de journalisation : debug, info, warn, error")
+		showVer   = flag.Bool("version", false, "affiche la version et quitte")
+		listOnly  = flag.Bool("list", false, "affiche l'état enregistré et quitte")
+		dumpZones = flag.Bool("print-zones", false, "affiche les zones d'exemple en JSON et quitte")
+		keepNet   = flag.Bool("keep-network", false, "conserve bridges et interfaces tap à l'extinction")
 	)
-	flag.Var(&specs, "vm", "vm à faire tourner, répétable. Forme :\n"+
-		"  name=web1,service=web-apache,tap=tap0,ip=10.42.10.2/24,gw=10.42.10.1[,vcpu=1][,mem=256][,zone=publique][,restart=true]")
+	flag.Var(&vms, "vm", "vm à faire tourner, répétable. Forme :\n"+
+		"  name=web1,service=web-apache,zone=publique[,vcpu=1][,mem=256][,restart=true]\n"+
+		"  l'adressage est attribué par la zone, il n'est pas à indiquer")
 
 	flag.Parse()
 
@@ -56,10 +77,28 @@ func main() {
 		fmt.Printf("tinyvmosd %s\n", version)
 		return
 	}
+	if *dumpZones {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(network.ExampleZones()); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	log := newLogger(*logLevel)
 
-	if err := run(log, *statePth, *runDir, *jailDir, specs, *listOnly); err != nil {
+	opts := runOptions{
+		statePath: *statePth,
+		runDir:    *runDir,
+		jailDir:   *jailDir,
+		zonesPath: *zonesPath,
+		vms:       vms,
+		listOnly:  *listOnly,
+		keepNet:   *keepNet,
+	}
+	if err := run(log, opts); err != nil {
 		log.Error("arrêt sur erreur", "erreur", err)
 		os.Exit(1)
 	}
@@ -73,13 +112,23 @@ func newLogger(level string) *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: lvl}))
 }
 
-func run(log *slog.Logger, statePath, runDir, jailDir string, specs vmFlags, listOnly bool) error {
-	store, err := state.NewJSONStore(statePath)
+type runOptions struct {
+	statePath string
+	runDir    string
+	jailDir   string
+	zonesPath string
+	vms       []string
+	listOnly  bool
+	keepNet   bool
+}
+
+func run(log *slog.Logger, o runOptions) error {
+	store, err := state.NewJSONStore(o.statePath)
 	if err != nil {
 		return err
 	}
 
-	if listOnly {
+	if o.listOnly {
 		return printState(store)
 	}
 
@@ -87,44 +136,171 @@ func run(log *slog.Logger, statePath, runDir, jailDir string, specs vmFlags, lis
 		return fmt.Errorf("tinyvmosd doit tourner en root : il crée des interfaces réseau, des jails et des cgroups")
 	}
 
-	hypervisor, err := vm.NewFirecracker(runDir, jailDir, log)
+	// jailer installe les artefacts dans la jail par liens durs, qui exigent
+	// que la jail et les artefacts soient sur le même système de fichiers. La
+	// placer à côté du fichier d'état est le défaut le plus sûr ; un chemin
+	// explicite reste possible pour qui sait ce qu'il fait.
+	jailDir := o.jailDir
+	if jailDir == "" {
+		jailDir = filepath.Join(filepath.Dir(o.statePath), "jail")
+	}
+
+	requests, err := parseVMRequests(o.vms)
 	if err != nil {
 		return err
 	}
 
+	zones, err := loadZones(o.zonesPath)
+	if err != nil {
+		return err
+	}
+	if err := network.ValidateZones(zones); err != nil {
+		return err
+	}
+
+	hypervisor, err := vm.NewFirecracker(o.runDir, jailDir, log)
+	if err != nil {
+		return err
+	}
 	mgr, err := vm.NewManager(hypervisor, store, log)
 	if err != nil {
 		return err
 	}
+	// L'interface tap doit appartenir à l'utilisateur confiné sous lequel
+	// tourne Firecracker, sinon il ne peut pas l'ouvrir.
+	jailUID, jailGID, err := vm.JailUserIDs()
+	if err != nil {
+		return err
+	}
+	netMgr := network.NewManager(log, uint32(jailUID), uint32(jailGID))
 
 	log.Info("démon démarré",
-		"version", version, "état", statePath, "run", runDir, "jails", jailDir)
+		"version", version, "état", o.statePath, "run", o.runDir, "jails", jailDir)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	parsed := make([]vm.Spec, 0, len(specs))
-	for _, raw := range specs {
-		spec, err := parseVMFlag(raw)
-		if err != nil {
-			return err
+	// Le préfixe IPv6 de l'installation est tiré au premier démarrage puis
+	// conservé : s'il changeait, toutes les adresses déjà attribuées
+	// deviendraient fausses.
+	if err := mgr.WithState(func(snap *vm.Snapshot) error {
+		if snap.Alloc == nil {
+			alloc, err := network.NewAllocation()
+			if err != nil {
+				return err
+			}
+			snap.Alloc = alloc
+			log.Info("préfixe IPv6 de l'installation tiré", "préfixe", alloc.ULAPrefix)
 		}
-		parsed = append(parsed, spec)
-	}
-
-	for _, spec := range parsed {
-		// Une VM déjà connue de l'état précédent est reprise, pas recréée.
-		if _, err := mgr.Get(spec.Name); err != nil {
-			if err := mgr.Create(ctx, spec); err != nil {
+		for i := range zones {
+			if err := snap.Alloc.ResolveZoneIPv6(&zones[i]); err != nil {
 				return err
 			}
 		}
-		if err := mgr.Start(ctx, spec.Name); err != nil {
+		snap.Zones = zones
+		return nil
+	}); err != nil {
+		return err
+	}
+
+	if err := network.ValidateZones(zones); err != nil {
+		return fmt.Errorf("zones invalides après attribution IPv6 : %w", err)
+	}
+
+	if err := netMgr.EnableForwarding(); err != nil {
+		return err
+	}
+
+	// Seules les zones réellement utilisées sont posées : un bridge inutile
+	// est une interface de plus à surveiller pour rien.
+	used := map[string]network.Zone{}
+	for _, r := range requests {
+		z, ok := findZone(zones, r.Zone)
+		if !ok {
+			return fmt.Errorf("vm %s : zone %q inconnue. Zones déclarées : %s",
+				r.Name, r.Zone, strings.Join(zoneNames(zones), ", "))
+		}
+		used[z.Name] = z
+	}
+	for _, z := range used {
+		if err := netMgr.EnsureZone(z); err != nil {
 			return err
 		}
 	}
 
-	if len(parsed) == 0 {
+	var createdTaps []string
+	cleanupNetwork := func() {
+		if o.keepNet {
+			log.Info("réseau conservé à la demande", "taps", len(createdTaps))
+			return
+		}
+		for _, name := range createdTaps {
+			if err := netMgr.RemoveTap(name); err != nil {
+				log.Warn("suppression d'interface tap en échec", "vm", name, "erreur", err)
+			}
+		}
+		for _, z := range used {
+			if err := netMgr.RemoveZone(z); err != nil {
+				log.Warn("suppression de zone en échec", "zone", z.Name, "erreur", err)
+			}
+		}
+	}
+
+	for _, r := range requests {
+		z := used[r.Zone]
+
+		var lease *network.Lease
+		if err := mgr.WithState(func(snap *vm.Snapshot) error {
+			l, err := snap.Alloc.Allocate(z, r.Name)
+			if err != nil {
+				return err
+			}
+			lease = l
+			return nil
+		}); err != nil {
+			cleanupNetwork()
+			return err
+		}
+
+		tap, err := netMgr.EnsureTap(z, r.Name)
+		if err != nil {
+			cleanupNetwork()
+			return err
+		}
+		createdTaps = append(createdTaps, r.Name)
+
+		spec := vm.Spec{
+			Name:       r.Name,
+			Service:    r.Service,
+			Zone:       z.Name,
+			VCPU:       r.VCPU,
+			MemMiB:     r.MemMiB,
+			KernelPath: r.Kernel,
+			ImagePath:  r.Image,
+			TapDevice:  tap,
+			MAC:        vm.DeterministicMAC(r.Name),
+			IP:         lease.IPv4,
+			Gateway:    lease.GatewayV4,
+			IPv6:       lease.IPv6,
+			GatewayV6:  lease.GatewayV6,
+			Restart:    r.Restart,
+		}
+
+		log.Info("vm adressée",
+			"vm", r.Name, "zone", z.Name, "tap", tap,
+			"ipv4", lease.IPv4, "ipv6", lease.IPv6)
+
+		if err := mgr.Ensure(ctx, spec); err != nil {
+			cleanupNetwork()
+			return err
+		}
+		if err := mgr.Start(ctx, r.Name); err != nil {
+			cleanupNetwork()
+			return err
+		}
+	}
+
+	if len(requests) == 0 {
 		log.Warn("aucune vm demandée : le démon tourne à vide. Utiliser -vm pour en déclarer une.")
 	}
 
@@ -136,11 +312,50 @@ func run(log *slog.Logger, statePath, runDir, jailDir string, specs vmFlags, lis
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	if err := mgr.StopAll(shutdownCtx); err != nil {
-		return fmt.Errorf("arrêt des vm incomplet : %w", err)
+	stopErr := mgr.StopAll(shutdownCtx)
+	cleanupNetwork()
+
+	if stopErr != nil {
+		return fmt.Errorf("arrêt des vm incomplet : %w", stopErr)
 	}
 	log.Info("démon arrêté")
 	return nil
+}
+
+func findZone(zones []network.Zone, name string) (network.Zone, bool) {
+	for _, z := range zones {
+		if z.Name == name {
+			return z, true
+		}
+	}
+	return network.Zone{}, false
+}
+
+func zoneNames(zones []network.Zone) []string {
+	out := make([]string, 0, len(zones))
+	for _, z := range zones {
+		out = append(out, z.Name)
+	}
+	return out
+}
+
+// loadZones lit les zones depuis un fichier JSON, ou renvoie celles d'exemple.
+func loadZones(path string) ([]network.Zone, error) {
+	if path == "" {
+		return network.ExampleZones(), nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("lecture des zones %s : %w", path, err)
+	}
+	var zones []network.Zone
+	if err := json.Unmarshal(data, &zones); err != nil {
+		return nil, fmt.Errorf("zones %s illisibles : %w", path, err)
+	}
+	if len(zones) == 0 {
+		return nil, fmt.Errorf("zones %s : aucune zone déclarée", path)
+	}
+	return zones, nil
 }
 
 func printState(store *state.JSONStore) error {
@@ -148,28 +363,58 @@ func printState(store *state.JSONStore) error {
 	if err != nil {
 		return err
 	}
+
+	if snap.Alloc != nil && snap.Alloc.ULAPrefix != "" {
+		fmt.Printf("préfixe IPv6 de l'installation : %s\n\n", snap.Alloc.ULAPrefix)
+	}
+
+	if len(snap.Zones) > 0 {
+		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(w, "ZONE\tBRIDGE\tIPV4\tIPV6")
+		for _, z := range snap.Zones {
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", z.Name, z.BridgeName(), z.IPv4, z.IPv6)
+		}
+		if err := w.Flush(); err != nil {
+			return err
+		}
+		fmt.Println()
+	}
+
 	if len(snap.VMs) == 0 {
 		fmt.Println("aucune vm enregistrée")
 		return nil
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "NOM\tSERVICE\tZONE\tSTATUT\tPID\tRELANCES\tIP\tERREUR")
+	fmt.Fprintln(w, "NOM\tSERVICE\tZONE\tSTATUT\tPID\tRELANCES\tIPV4\tIPV6\tERREUR")
 	for _, rec := range snap.VMs {
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\t%d\t%s\t%s\n",
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\t%d\t%s\t%s\t%s\n",
 			rec.Spec.Name, rec.Spec.Service, rec.Spec.Zone,
-			rec.Status, rec.PID, rec.Restarts, rec.Spec.IP, rec.LastError)
+			rec.Status, rec.PID, rec.Restarts,
+			rec.Spec.IP, rec.Spec.IPv6, rec.LastError)
 	}
 	return w.Flush()
 }
 
-// parseVMFlag lit la forme clé=valeur séparée par des virgules de -vm.
+// parseVMRequests lit les drapeaux -vm.
 //
 // Cette forme est volontairement rudimentaire : elle disparaîtra au profit de
 // tinyvmos.yaml dès le lot C. Elle n'existe que pour pouvoir exercer le démon
 // de bout en bout dès maintenant.
-func parseVMFlag(raw string) (vm.Spec, error) {
-	spec := vm.Spec{VCPU: 1, MemMiB: 256, Zone: "defaut", Restart: true}
+func parseVMRequests(raws []string) ([]vmRequest, error) {
+	out := make([]vmRequest, 0, len(raws))
+	for _, raw := range raws {
+		r, err := parseVMRequest(raw)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, nil
+}
+
+func parseVMRequest(raw string) (vmRequest, error) {
+	r := vmRequest{VCPU: 1, MemMiB: 256, Zone: "publique", Restart: true}
 
 	for _, part := range strings.Split(raw, ",") {
 		part = strings.TrimSpace(part)
@@ -178,68 +423,60 @@ func parseVMFlag(raw string) (vm.Spec, error) {
 		}
 		key, value, found := strings.Cut(part, "=")
 		if !found {
-			return spec, fmt.Errorf("-vm %q : %q n'est pas de la forme clé=valeur", raw, part)
+			return r, fmt.Errorf("-vm %q : %q n'est pas de la forme clé=valeur", raw, part)
 		}
 
 		switch key {
 		case "name":
-			spec.Name = value
+			r.Name = value
 		case "service":
-			spec.Service = value
+			r.Service = value
 		case "zone":
-			spec.Zone = value
-		case "tap":
-			spec.TapDevice = value
-		case "ip":
-			spec.IP = value
-		case "gw":
-			spec.Gateway = value
-		case "mac":
-			spec.MAC = value
+			r.Zone = value
 		case "kernel":
-			spec.KernelPath = value
+			r.Kernel = value
 		case "image":
-			spec.ImagePath = value
+			r.Image = value
 		case "vcpu":
 			n, err := strconv.ParseInt(value, 10, 64)
 			if err != nil {
-				return spec, fmt.Errorf("-vm %q : vcpu=%q n'est pas un entier", raw, value)
+				return r, fmt.Errorf("-vm %q : vcpu=%q n'est pas un entier", raw, value)
 			}
-			spec.VCPU = n
+			r.VCPU = n
 		case "mem":
 			n, err := strconv.ParseInt(value, 10, 64)
 			if err != nil {
-				return spec, fmt.Errorf("-vm %q : mem=%q n'est pas un entier", raw, value)
+				return r, fmt.Errorf("-vm %q : mem=%q n'est pas un entier", raw, value)
 			}
-			spec.MemMiB = n
+			r.MemMiB = n
 		case "restart":
 			b, err := strconv.ParseBool(value)
 			if err != nil {
-				return spec, fmt.Errorf("-vm %q : restart=%q n'est pas un booléen", raw, value)
+				return r, fmt.Errorf("-vm %q : restart=%q n'est pas un booléen", raw, value)
 			}
-			spec.Restart = b
+			r.Restart = b
+		case "tap", "ip", "gw", "mac":
+			return r, fmt.Errorf("-vm %q : %q n'est plus accepté. L'adressage et l'interface tap sont attribués par la zone", raw, key)
 		default:
-			return spec, fmt.Errorf("-vm %q : clé inconnue %q", raw, key)
+			return r, fmt.Errorf("-vm %q : clé inconnue %q", raw, key)
 		}
 	}
 
-	// Chemins par défaut : ceux produits par les scripts de la Phase 1.
-	if spec.KernelPath == "" {
-		spec.KernelPath = defaultKernelPath()
+	if r.Name == "" {
+		return r, fmt.Errorf("-vm %q : name est obligatoire", raw)
 	}
-	if spec.ImagePath == "" && spec.Service != "" {
-		spec.ImagePath = defaultImagePath(spec.Service)
-	}
-	// MAC déterministe dérivée du nom : une VM garde la même d'un démarrage à
-	// l'autre, ce qui rend baux et règles reproductibles.
-	if spec.MAC == "" && spec.Name != "" {
-		spec.MAC = vm.DeterministicMAC(spec.Name)
+	if r.Service == "" {
+		return r, fmt.Errorf("-vm %q : service est obligatoire", raw)
 	}
 
-	if err := spec.Validate(); err != nil {
-		return spec, err
+	// Chemins par défaut : ceux produits par les scripts de build.
+	if r.Kernel == "" {
+		r.Kernel = defaultKernelPath()
 	}
-	return spec, nil
+	if r.Image == "" {
+		r.Image = defaultImagePath(r.Service)
+	}
+	return r, nil
 }
 
 // artifactRoot localise les artefacts produits par les scripts de build.
