@@ -32,7 +32,7 @@ Pas encore d'API : le démon prend ses zones, ses flux et ses VM sur la ligne de
 | A | `VMM`, Firecracker sous `jailer`, machine d'état, relance auto, magasin d'état | fait |
 | B1 | Zones, bridges et tap par netlink, adressage double pile | fait |
 | B2 | Pare-feu nftables « tout refuser », flux déclarés et publication de services | fait |
-| C | Schéma `tinyvmos.yaml`, validation, réconciliation, `--dry-run` | à faire |
+| C | Schéma `tinyvmos.yaml`, validation, `--dry-run` | à faire. La **boucle de réconciliation** est déjà en place, voir `reconcile/` |
 | D | `openapi.yaml`, REST et WebSocket, TLS, authentification par appareil, rôles | à faire |
 | E | Journal d'audit chaîné par hachage | à faire |
 | F | `tinyvmosctl` | à faire |

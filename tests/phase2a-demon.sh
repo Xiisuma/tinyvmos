@@ -220,7 +220,7 @@ check $? "aucun processus Firecracker ne survit au démon"
 check $? "l'état final enregistre la vm comme stopped"
 
 # L'état doit survivre à l'arrêt : c'est tout l'intérêt de le persister.
-"$DAEMON_BIN" -state "$STATE_FILE" -list | grep -q "$VM"
+texte_contient "$("$DAEMON_BIN" -state "$STATE_FILE" -list)" "$VM"
 check $? "l'état relu après extinction contient encore la vm"
 
 # ---------------------------------------------------------------- Bilan

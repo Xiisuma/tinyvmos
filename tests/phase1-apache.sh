@@ -69,7 +69,7 @@ run_scenario() {
         return
     fi
 
-    curl -fsS --max-time 5 "http://${GUEST_IP}/" 2>/dev/null | grep -q 'web-apache'
+    texte_contient "$(curl -fsS --max-time 5 "http://${GUEST_IP}/" 2>/dev/null)" 'web-apache'
     check $? "$mode : la page servie est bien celle de l'image"
 
     local code
@@ -81,7 +81,7 @@ run_scenario() {
     # ni le systeme. Cette image finira face a des joueurs de CTF.
     local server
     server=$(curl -sSI --max-time 5 "http://${GUEST_IP}/" 2>/dev/null | grep -i '^server:' | tr -d '\r')
-    if printf '%s' "$server" | grep -qiE 'unix|alpine|[0-9]+\.[0-9]+\.[0-9]+'; then
+    if grep -qiE 'unix|alpine|[0-9]+\.[0-9]+\.[0-9]+' <<< "$server"; then
         check 1 "$mode : l'en-tête Server divulgue trop ($server)"
     else
         check 0 "$mode : l'en-tête Server ne divulgue rien (${server:-absent})"

@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/Xiisuma/tinyvmos/controlplane/network"
+	reconcilepkg "github.com/Xiisuma/tinyvmos/controlplane/reconcile"
 	"github.com/Xiisuma/tinyvmos/controlplane/state"
 	"github.com/Xiisuma/tinyvmos/controlplane/vm"
 )
@@ -61,6 +62,8 @@ func main() {
 		flowsPath = flag.String("flows", "", "fichier JSON décrivant les flux autorisés. Vide avec des zones explicites, aucun flux n'est autorisé")
 		pubsPath  = flag.String("publications", "", "fichier JSON décrivant les services publiés vers l'extérieur")
 		uplink    = flag.String("uplink", "", "interface de sortie vers l'extérieur. Vide, elle est déduite de la route par défaut")
+		reconcile = flag.Duration("reconcile-interval", reconcilepkg.DefaultInterval,
+			"délai entre deux passes de réconciliation. 0 désactive la réparation automatique, ce qui n'est pas recommandé")
 		runDir    = flag.String("run-dir", "/run/tinyvmos", "dossier des sockets et journaux de console")
 		jailDir   = flag.String("jail-dir", "", "racine des jails. Vide, un dossier jail/ à côté du fichier d'état, pour que les liens durs de jailer restent possibles")
 		statePth  = flag.String("state", "/var/lib/tinyvmos/state.json", "fichier d'état du démon")
@@ -107,6 +110,7 @@ func main() {
 		flowsPath: *flowsPath,
 		pubsPath:  *pubsPath,
 		uplink:    *uplink,
+		reconcile: *reconcile,
 		vms:       vms,
 		listOnly:  *listOnly,
 		keepNet:   *keepNet,
@@ -134,6 +138,7 @@ type runOptions struct {
 	flowsPath string
 	pubsPath  string
 	uplink    string
+	reconcile time.Duration
 	vms       []string
 	listOnly  bool
 	keepNet   bool
@@ -404,6 +409,18 @@ func run(log *slog.Logger, o runOptions) error {
 	if len(requests) == 0 {
 		log.Warn("aucune vm demandée : le démon tourne à vide. Utiliser -vm pour en déclarer une.")
 	}
+
+	// La réconciliation tourne jusqu'à l'extinction. Sans elle, une isolation
+	// détruite par un tiers ne serait jamais rétablie.
+	reconciler := &reconcilepkg.Reconciler{
+		VMs:      mgr,
+		Net:      netMgr,
+		Firewall: firewall,
+		Policy:   policy,
+		Log:      log,
+		Interval: o.reconcile,
+	}
+	go reconciler.Run(ctx)
 
 	<-ctx.Done()
 	log.Info("signal reçu, arrêt des vm")

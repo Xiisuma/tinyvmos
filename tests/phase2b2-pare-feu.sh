@@ -198,10 +198,10 @@ make_probe probe-pub vpp "br-${Z_PUB}" 10.42.95.9/24 10.42.95.1 \
 make_probe probe-dat vpd "br-${Z_DAT}" 10.42.93.9/24 10.42.93.1 \
     "${Z_DAT_V6%::/64}::9/64" "${Z_DAT_V6%::/64}::1"
 
-ip netns exec probe-pub ip addr show peer0 | grep -q '10.42.95.9'
+texte_contient "$(ip netns exec probe-pub ip addr show peer0)" '10.42.95.9'
 check $? "la sonde de la zone autorisée est en place"
 
-ip netns exec probe-dat ip addr show peer0 | grep -q '10.42.93.9'
+texte_contient "$(ip netns exec probe-dat ip addr show peer0)" '10.42.93.9'
 check $? "la sonde de la zone sans flux est en place"
 
 # ------------------------------------------------- Le flux déclaré passe
@@ -276,7 +276,7 @@ log "=== sortie Internet ==="
 # Aucun flux vers Internet n'est déclaré dans ce test : aucune zone ne doit
 # avoir de traduction d'adresses. C'est la seconde barrière qui tient la
 # promesse « aucune donnée ne sort ».
-! nft list table inet tinyvmos | grep -q 'masquerade'
+! nft_contient 'masquerade'
 check $? "aucune traduction d'adresses, puisqu'aucune sortie Internet n'est déclarée"
 
 ! ip netns exec probe-dat curl -fsS --max-time 4 -o /dev/null "http://1.1.1.1/"
@@ -290,7 +290,7 @@ log "=== respect du reste de la machine ==="
 nft list table inet essai_voisin >/dev/null 2>&1
 check $? "la table nftables étrangère a survécu : TinyVMOS ne possède que sa table"
 
-! nft list table inet tinyvmos | grep -q 'policy drop'
+! nft_contient 'policy drop'
 check $? "aucune chaîne en policy drop : la table ne casse pas le trafic des autres outils"
 
 # ------------------------------------------------------- Arrêt propre
