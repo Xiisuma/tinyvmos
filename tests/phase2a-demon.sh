@@ -81,7 +81,7 @@ command -v jq >/dev/null || die "jq requis pour ce test"
 
 [ -x "$DAEMON_BIN" ] || die "démon absent : lancer « cd controlplane && go build -o ../output/bin/tinyvmosd ./cmd/tinyvmosd »"
 
-id -u "${JailUser:-tinyvmos}" >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin tinyvmos
+id -u tinyvmos >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin tinyvmos
 
 "${REPO_ROOT}/images/kernel/fetch-kernel.sh" >/dev/null 2>&1 || die "noyau invité indisponible"
 if [ ! -f "${IMAGES_OUT}/${SERVICE}.ext4" ]; then

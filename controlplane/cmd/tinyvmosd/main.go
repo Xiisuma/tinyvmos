@@ -59,6 +59,7 @@ func main() {
 		vms       repeatedFlag
 		zonesPath = flag.String("zones", "", "fichier JSON décrivant les zones. Vide, les cinq zones d'exemple sont utilisées")
 		flowsPath = flag.String("flows", "", "fichier JSON décrivant les flux autorisés. Vide avec des zones explicites, aucun flux n'est autorisé")
+		pubsPath  = flag.String("publications", "", "fichier JSON décrivant les services publiés vers l'extérieur")
 		uplink    = flag.String("uplink", "", "interface de sortie vers l'extérieur. Vide, elle est déduite de la route par défaut")
 		runDir    = flag.String("run-dir", "/run/tinyvmos", "dossier des sockets et journaux de console")
 		jailDir   = flag.String("jail-dir", "", "racine des jails. Vide, un dossier jail/ à côté du fichier d'état, pour que les liens durs de jailer restent possibles")
@@ -104,6 +105,7 @@ func main() {
 		jailDir:   *jailDir,
 		zonesPath: *zonesPath,
 		flowsPath: *flowsPath,
+		pubsPath:  *pubsPath,
 		uplink:    *uplink,
 		vms:       vms,
 		listOnly:  *listOnly,
@@ -130,6 +132,7 @@ type runOptions struct {
 	jailDir   string
 	zonesPath string
 	flowsPath string
+	pubsPath  string
 	uplink    string
 	vms       []string
 	listOnly  bool
@@ -191,6 +194,22 @@ func run(log *slog.Logger, o runOptions) error {
 		return err
 	}
 
+	pubs, err := loadPublications(o.pubsPath)
+	if err != nil {
+		return err
+	}
+
+	// Refuser une publication fausse maintenant, avant d'avoir posé un bridge
+	// ou démarré une VM. La vérification complète, qui a besoin des adresses
+	// attribuées, reste faite à l'application du pare-feu.
+	declared := map[string]bool{}
+	for _, r := range requests {
+		declared[r.Name] = true
+	}
+	if err := network.ValidatePublicationsSyntax(pubs, declared); err != nil {
+		return err
+	}
+
 	hypervisor, err := vm.NewFirecracker(o.runDir, jailDir, log)
 	if err != nil {
 		return err
@@ -248,6 +267,10 @@ func run(log *slog.Logger, o runOptions) error {
 	// Le pare-feu est posé avant la première VM. Dans l'autre ordre, une VM
 	// aurait un réseau ouvert pendant quelques instants, ce qui suffirait à
 	// invalider la promesse d'isolation.
+	//
+	// Les publications ne sont pas encore connues : elles désignent des
+	// adresses de VM, qui ne sont attribuées qu'ensuite. Le pare-feu est donc
+	// posé en deux temps, et le premier est le plus restrictif des deux.
 	policy := network.Policy{Zones: zones, Flows: flows}
 	if err := firewall.Apply(policy); err != nil {
 		return err
@@ -352,6 +375,32 @@ func run(log *slog.Logger, o runOptions) error {
 		}
 	}
 
+	// Deuxième application, maintenant que les adresses sont attribuées : les
+	// redirections de port peuvent désigner leur destination.
+	if len(pubs) > 0 {
+		leases := map[string]network.Lease{}
+		mgr.ReadState(func(snap *vm.Snapshot) {
+			if snap.Alloc == nil {
+				return
+			}
+			for name, l := range snap.Alloc.Leases {
+				leases[name] = *l
+			}
+		})
+
+		policy.Publications = pubs
+		policy.Leases = leases
+		if err := firewall.Apply(policy); err != nil {
+			cleanupNetwork()
+			return err
+		}
+		for _, pub := range pubs {
+			log.Info("service publié",
+				"vm", pub.VM, "port_vm", pub.Port,
+				"port_expose", pub.HostPortOrPort(), "proto", pub.ProtoOrTCP())
+		}
+	}
+
 	if len(requests) == 0 {
 		log.Warn("aucune vm demandée : le démon tourne à vide. Utiliser -vm pour en déclarer une.")
 	}
@@ -425,6 +474,25 @@ func printRuleset(log *slog.Logger, o runOptions) error {
 	}
 	fmt.Print(ruleset)
 	return nil
+}
+
+// loadPublications lit les services publiés depuis un fichier JSON.
+//
+// Sans fichier, rien n'est publié. Pour une exposition vers l'extérieur, le
+// défaut ne peut être que l'absence.
+func loadPublications(path string) ([]network.Publication, error) {
+	if path == "" {
+		return nil, nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("lecture des publications %s : %w", path, err)
+	}
+	var pubs []network.Publication
+	if err := json.Unmarshal(data, &pubs); err != nil {
+		return nil, fmt.Errorf("publications %s illisibles : %w", path, err)
+	}
+	return pubs, nil
 }
 
 // loadFlows lit les flux depuis un fichier JSON.

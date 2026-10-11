@@ -31,7 +31,7 @@ Pas encore d'API : le démon prend ses zones, ses flux et ses VM sur la ligne de
 |---|---|---|
 | A | `VMM`, Firecracker sous `jailer`, machine d'état, relance auto, magasin d'état | fait |
 | B1 | Zones, bridges et tap par netlink, adressage double pile | fait |
-| B2 | Pare-feu nftables « tout refuser » et flux déclarés | fait |
+| B2 | Pare-feu nftables « tout refuser », flux déclarés et publication de services | fait |
 | C | Schéma `tinyvmos.yaml`, validation, réconciliation, `--dry-run` | à faire |
 | D | `openapi.yaml`, REST et WebSocket, TLS, authentification par appareil, rôles | à faire |
 | E | Journal d'audit chaîné par hachage | à faire |
@@ -141,9 +141,14 @@ sudo pkill -9 -x firecracker     # la vm doit se relancer seule
 La forme `-vm clé=valeur` est provisoire : elle disparaîtra au profit de `tinyvmos.yaml`
 au lot C. Elle n'existe que pour exercer le démon de bout en bout dès maintenant.
 
-## Limite connue
+## Liens durs de jailer : réglé
 
-`jailer` installe les artefacts dans la jail par **liens durs**, qui exigent que la jail
-et les artefacts soient sur le même système de fichiers. Avec les valeurs par défaut
-(`/srv/jailer` et `/var/lib/tinyvmos`), ce n'est pas garanti. À traiter au lot B, soit en
-plaçant la jail à côté des artefacts, soit en repliant sur une copie.
+`jailer` installe les artefacts dans la jail par **liens durs**, qui exigent que la jail et
+les artefacts soient sur le même système de fichiers. Deux mesures :
+
+- le défaut de `-jail-dir` est un dossier `jail/` à côté du fichier d'état, donc sur le
+  même système de fichiers que lui ;
+- si les chemins sont donnés explicitement et tombent sur deux systèmes de fichiers
+  différents, `Create` échoue **avec un message qui le dit**. Sans cette vérification,
+  l'échec arrivait bien plus loin sous la forme d'un « Invalid argument » de `jailer` qui
+  ne renseignait sur rien.

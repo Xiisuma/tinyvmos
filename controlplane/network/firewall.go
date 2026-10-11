@@ -46,6 +46,13 @@ func NewFirewall(log *slog.Logger, uplink, rulesetPath string) *Firewall {
 type Policy struct {
 	Zones []Zone
 	Flows []Flow
+
+	// Publications expose des ports de VM vers l'extérieur.
+	Publications []Publication
+
+	// Leases donne l'adressage de chaque VM, indexé par son nom. Nécessaire
+	// aux publications, qui redirigent vers une adresse précise.
+	Leases map[string]Lease
 }
 
 // Validate vérifie la cohérence de l'ensemble avant de toucher au pare-feu.
@@ -53,7 +60,10 @@ func (p Policy) Validate() error {
 	if err := ValidateZones(p.Zones); err != nil {
 		return err
 	}
-	return ValidateFlows(p.Flows, p.Zones)
+	if err := ValidateFlows(p.Flows, p.Zones); err != nil {
+		return err
+	}
+	return ValidatePublications(p.Publications, p.Leases, p.Zones)
 }
 
 func (p Policy) zoneByName(name string) (Zone, bool) {
@@ -149,6 +159,7 @@ func (f *Firewall) Ruleset(p Policy) (string, error) {
 
 	f.writeForwardChain(w, p, uplink)
 	f.writeInputChain(w, p)
+	f.writePreroutingChain(w, p, uplink)
 	f.writeNATChain(w, p, uplink)
 
 	w("}")
@@ -217,8 +228,46 @@ func (f *Firewall) writeForwardChain(w func(string, ...any), p Policy, uplink st
 		if fl.Comment != "" {
 			w("\t\t# %s", fl.Comment)
 		}
-		w("\t\tiifname \"%s\" oifname \"%s\" %s accept",
-			src.BridgeName(), oif, matchExpr(fl))
+		w("\t\t%s", rule(
+			fmt.Sprintf("iifname %q", src.BridgeName()),
+			fmt.Sprintf("oifname %q", oif),
+			matchExpr(fl),
+			"accept",
+		))
+	}
+
+	// Le trafic redirigé par une publication doit être autorisé à traverser
+	// vers la VM. La redirection d'adresse a lieu avant ce filtrage : à ce
+	// stade, la destination est déjà l'adresse de la VM.
+	for _, pub := range sortedPublications(p.Publications) {
+		lease, ok := p.Leases[pub.VM]
+		if !ok || uplink == "" {
+			continue
+		}
+		z, ok := p.zoneByName(lease.Zone)
+		if !ok {
+			continue
+		}
+		addr := lease.IPv4
+		if i := strings.IndexByte(addr, '/'); i >= 0 {
+			addr = addr[:i]
+		}
+		if pub.Comment != "" {
+			w("\t\t# publication : %s", pub.Comment)
+		}
+		// ct status dnat est indispensable, pas décoratif. Sans lui, la règle
+		// accepte aussi un paquet venu de l'extérieur visant directement
+		// l'adresse privée de la VM, sans passer par la redirection. Sur un
+		// réseau plat où quelqu'un ajoute une route vers la plage privée, le
+		// service entier serait joignable en contournant le port publié.
+		w("\t\t%s", rule(
+			fmt.Sprintf("iifname %q", uplink),
+			fmt.Sprintf("oifname %q", z.BridgeName()),
+			"ct status dnat",
+			fmt.Sprintf("ip daddr %s", addr),
+			fmt.Sprintf("%s dport %d", pub.ProtoOrTCP(), pub.Port),
+			"accept",
+		))
 	}
 
 	w("")
@@ -259,7 +308,11 @@ func (f *Firewall) writeInputChain(w func(string, ...any), p Policy) {
 		if fl.Comment != "" {
 			w("\t\t# %s", fl.Comment)
 		}
-		w("\t\tiifname \"%s\" %s accept", src.BridgeName(), matchExpr(fl))
+		w("\t\t%s", rule(
+			fmt.Sprintf("iifname %q", src.BridgeName()),
+			matchExpr(fl),
+			"accept",
+		))
 		hostFlows++
 	}
 	if hostFlows == 0 {
@@ -272,6 +325,53 @@ func (f *Firewall) writeInputChain(w func(string, ...any), p Policy) {
 	w("\t\t# d administration de la machine.")
 	w("\t\tiifname @%s limit rate 10/minute log prefix \"tinyvmos refus vers hote \" level info", zoneSetName)
 	w("\t\tiifname @%s counter drop", zoneSetName)
+	w("\t}")
+	w("")
+}
+
+// writePreroutingChain écrit les redirections de port des services publiés.
+//
+// Seule la famille IPv4 est traitée, et c'est un choix. Les adresses IPv6 des
+// zones sont des adresses locales uniques : les publier par redirection
+// supposerait du NAT66, qui est une mauvaise pratique reconnue et casse la
+// traçabilité des connexions. Publier correctement un service en IPv6 demande
+// un préfixe routé depuis l'extérieur, ce que la machine n'a pas aujourd'hui.
+// Mieux vaut ne rien faire que faire quelque chose de bancal sur ce terrain.
+func (f *Firewall) writePreroutingChain(w func(string, ...any), p Policy, uplink string) {
+	pubs := sortedPublications(p.Publications)
+
+	w("\tchain prerouting {")
+	w("\t\ttype nat hook prerouting priority dstnat; policy accept;")
+
+	if len(pubs) == 0 {
+		w("\t\t# Aucun service publie vers l exterieur.")
+		w("\t}")
+		w("")
+		return
+	}
+	if uplink == "" {
+		w("\t\t# Services publies ignores : aucune interface de sortie detectee.")
+		w("\t}")
+		w("")
+		return
+	}
+
+	for _, pub := range pubs {
+		lease, ok := p.Leases[pub.VM]
+		if !ok {
+			continue
+		}
+		addr := lease.IPv4
+		if i := strings.IndexByte(addr, '/'); i >= 0 {
+			addr = addr[:i]
+		}
+		if pub.Comment != "" {
+			w("\t\t# %s", pub.Comment)
+		}
+		w("\t\tiifname %q %s dport %d dnat ip to %s:%d",
+			uplink, pub.ProtoOrTCP(), pub.HostPortOrPort(), addr, pub.Port)
+	}
+
 	w("\t}")
 	w("")
 }
@@ -301,6 +401,21 @@ func (f *Firewall) writeNATChain(w func(string, ...any), p Policy, uplink string
 		}
 	}
 	w("\t}")
+}
+
+// rule assemble une règle en ignorant les morceaux vides.
+//
+// Sans ça, un flux qui ne précise aucun protocole produit un double espace
+// dans le fichier engendré. nft l'accepte, mais ce fichier est fait pour être
+// relu par un opérateur : autant qu'il soit propre.
+func rule(parts ...string) string {
+	kept := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			kept = append(kept, trimmed)
+		}
+	}
+	return strings.Join(kept, " ")
 }
 
 // matchExpr rend la partie protocole et ports d une règle.
@@ -350,7 +465,8 @@ func (f *Firewall) Apply(p Policy) error {
 	}
 
 	f.Log.Info("pare-feu applique",
-		"zones", len(p.Zones), "flux", len(p.Flows), "regles", f.RulesetPath)
+		"zones", len(p.Zones), "flux", len(p.Flows),
+		"publications", len(p.Publications), "regles", f.RulesetPath)
 	return nil
 }
 
