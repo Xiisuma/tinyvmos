@@ -163,11 +163,11 @@ La machine de développement (Ryzen 7 260, 15,29 Go de RAM, RTX 5050 8 Go) n'est
 - [x] Une adresse par micro-VM dans chaque famille, **attribuée et enregistrée** plutôt que dérivée du nom : un hachage entrerait en collision tôt ou tard, et sans bruit. Le test vérifie la stabilité après redémarrage du démon.
 
 ### 2.4 Pare-feu et flux
-- [ ] Générer les règles nftables via `google/nftables` (pas d'appel au binaire `nft`).
-- [ ] Politique par défaut : **tout refuser**, dans les deux sens, entre toutes les zones.
-- [ ] Chaque flux autorisé est déclaré dans `tinyvmos.yaml` (zone source, zone destination, protocole, port) et traduit en règle.
-- [ ] Vérifier qu'aucune route sortante n'existe depuis les zones Données et IA, au niveau du routage **et** du pare-feu.
-- [ ] Règle de sécurité : toute modification manuelle des règles est écrasée à la réconciliation suivante.
+- [x] Règles nftables engendrées en **texte** puis appliquées par `nft -f`, et non construites par netlink comme prévu initialement. `nft -f` est atomique, le résultat est lisible par un opérateur, et construire le bytecode des expressions pour une politique à deux familles serait long et facile à rater. Justifié en détail dans `controlplane/network/README.md`.
+- [x] Politique **tout refuser** entre zones, dans les deux sens, par des règles nommant les interfaces de zone. **Aucune chaîne n'est en `policy drop`** : ce serait casser le trafic routé des autres outils de la machine et, sur `input`, couper l'accès d'administration. La garantie est identique, l'effet de bord nul.
+- [x] Chaque flux est déclaré (source, destination, protocole, ports) et traduit en règle. Deux zones fictives, `internet` et `host`, rendent le modèle uniforme : une sortie Internet est un flux comme un autre, pas un drapeau sur la zone.
+- [x] Vérifié par test : une zone sans flux déclaré ne joint ni les autres zones, ni l'hôte, ni Internet, dans les deux familles. Et seules les zones ayant une sortie déclarée ont une traduction d'adresses, ce qui fait une seconde barrière.
+- [x] La table est remise à zéro puis réécrite à chaque application : toute retouche manuelle est écrasée. Seule la table `tinyvmos` est touchée, un test vérifie qu'une table étrangère survit.
 
 ### 2.5 VM DHCP et DNS interne
 - [ ] Image `images/dhcp-dns/` basée sur dnsmasq (ou Unbound + Kea si la séparation est préférée).

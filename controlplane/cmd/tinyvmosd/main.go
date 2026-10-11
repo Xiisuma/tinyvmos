@@ -58,6 +58,8 @@ func main() {
 	var (
 		vms       repeatedFlag
 		zonesPath = flag.String("zones", "", "fichier JSON décrivant les zones. Vide, les cinq zones d'exemple sont utilisées")
+		flowsPath = flag.String("flows", "", "fichier JSON décrivant les flux autorisés. Vide avec des zones explicites, aucun flux n'est autorisé")
+		uplink    = flag.String("uplink", "", "interface de sortie vers l'extérieur. Vide, elle est déduite de la route par défaut")
 		runDir    = flag.String("run-dir", "/run/tinyvmos", "dossier des sockets et journaux de console")
 		jailDir   = flag.String("jail-dir", "", "racine des jails. Vide, un dossier jail/ à côté du fichier d'état, pour que les liens durs de jailer restent possibles")
 		statePth  = flag.String("state", "/var/lib/tinyvmos/state.json", "fichier d'état du démon")
@@ -65,6 +67,8 @@ func main() {
 		showVer   = flag.Bool("version", false, "affiche la version et quitte")
 		listOnly  = flag.Bool("list", false, "affiche l'état enregistré et quitte")
 		dumpZones = flag.Bool("print-zones", false, "affiche les zones d'exemple en JSON et quitte")
+		dumpFlows = flag.Bool("print-flows", false, "affiche les flux d'exemple en JSON et quitte")
+		dumpRules = flag.Bool("print-ruleset", false, "affiche le jeu de règles nftables qui serait appliqué et quitte")
 		keepNet   = flag.Bool("keep-network", false, "conserve bridges et interfaces tap à l'extinction")
 	)
 	flag.Var(&vms, "vm", "vm à faire tourner, répétable. Forme :\n"+
@@ -78,9 +82,14 @@ func main() {
 		return
 	}
 	if *dumpZones {
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		if err := enc.Encode(network.ExampleZones()); err != nil {
+		if err := printJSON(network.ExampleZones()); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+	if *dumpFlows {
+		if err := printJSON(network.ExampleFlows()); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
@@ -94,9 +103,12 @@ func main() {
 		runDir:    *runDir,
 		jailDir:   *jailDir,
 		zonesPath: *zonesPath,
+		flowsPath: *flowsPath,
+		uplink:    *uplink,
 		vms:       vms,
 		listOnly:  *listOnly,
 		keepNet:   *keepNet,
+		dumpRules: *dumpRules,
 	}
 	if err := run(log, opts); err != nil {
 		log.Error("arrêt sur erreur", "erreur", err)
@@ -117,12 +129,28 @@ type runOptions struct {
 	runDir    string
 	jailDir   string
 	zonesPath string
+	flowsPath string
+	uplink    string
 	vms       []string
 	listOnly  bool
 	keepNet   bool
+	dumpRules bool
+}
+
+func printJSON(v any) error {
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(v)
 }
 
 func run(log *slog.Logger, o runOptions) error {
+	// Avant toute chose : afficher le jeu de regles ne doit rien creer ni
+	// exiger de droits. Sur un pare-feu, pouvoir lire ce qui va etre pose
+	// avant de le poser est la premiere des commodites.
+	if o.dumpRules {
+		return printRuleset(log, o)
+	}
+
 	store, err := state.NewJSONStore(o.statePath)
 	if err != nil {
 		return err
@@ -158,6 +186,11 @@ func run(log *slog.Logger, o runOptions) error {
 		return err
 	}
 
+	flows, err := loadFlows(o.flowsPath, o.zonesPath)
+	if err != nil {
+		return err
+	}
+
 	hypervisor, err := vm.NewFirecracker(o.runDir, jailDir, log)
 	if err != nil {
 		return err
@@ -173,6 +206,7 @@ func run(log *slog.Logger, o runOptions) error {
 		return err
 	}
 	netMgr := network.NewManager(log, uint32(jailUID), uint32(jailGID))
+	firewall := network.NewFirewall(log, o.uplink, filepath.Join(o.runDir, "ruleset.nft"))
 
 	log.Info("démon démarré",
 		"version", version, "état", o.statePath, "run", o.runDir, "jails", jailDir)
@@ -211,19 +245,34 @@ func run(log *slog.Logger, o runOptions) error {
 		return err
 	}
 
-	// Seules les zones réellement utilisées sont posées : un bridge inutile
-	// est une interface de plus à surveiller pour rien.
+	// Le pare-feu est posé avant la première VM. Dans l'autre ordre, une VM
+	// aurait un réseau ouvert pendant quelques instants, ce qui suffirait à
+	// invalider la promesse d'isolation.
+	policy := network.Policy{Zones: zones, Flows: flows}
+	if err := firewall.Apply(policy); err != nil {
+		return err
+	}
+	log.Info("pare-feu en place",
+		"zones", len(zones), "flux", len(flows),
+		"règles", filepath.Join(o.runDir, "ruleset.nft"))
+
+	// Toutes les zones déclarées sont posées, pas seulement celles qui portent
+	// une VM. C'est la cohérence d'un système déclaratif : ce qui figure dans la
+	// configuration existe. Et ça rend le pare-feu vrai — ses règles de refus
+	// nomment les interfaces de zone, qui doivent donc exister pour que le refus
+	// ait un sens.
 	used := map[string]network.Zone{}
+	for _, z := range zones {
+		used[z.Name] = z
+	}
 	for _, r := range requests {
-		z, ok := findZone(zones, r.Zone)
-		if !ok {
+		if _, ok := findZone(zones, r.Zone); !ok {
 			return fmt.Errorf("vm %s : zone %q inconnue. Zones déclarées : %s",
 				r.Name, r.Zone, strings.Join(zoneNames(zones), ", "))
 		}
-		used[z.Name] = z
 	}
-	for _, z := range used {
-		if err := netMgr.EnsureZone(z); err != nil {
+	for _, name := range zoneNames(zones) {
+		if err := netMgr.EnsureZone(used[name]); err != nil {
 			return err
 		}
 	}
@@ -233,6 +282,9 @@ func run(log *slog.Logger, o runOptions) error {
 		if o.keepNet {
 			log.Info("réseau conservé à la demande", "taps", len(createdTaps))
 			return
+		}
+		if err := firewall.Flush(); err != nil {
+			log.Warn("retrait du pare-feu en échec", "erreur", err)
 		}
 		for _, name := range createdTaps {
 			if err := netMgr.RemoveTap(name); err != nil {
@@ -337,6 +389,66 @@ func zoneNames(zones []network.Zone) []string {
 		out = append(out, z.Name)
 	}
 	return out
+}
+
+// printRuleset affiche le jeu de règles qui serait appliqué, sans rien
+// installer et sans exiger les droits root.
+//
+// C'est le pendant du --dry-run : sur un pare-feu, pouvoir lire ce qui va être
+// posé avant de le poser n'est pas un luxe.
+func printRuleset(log *slog.Logger, o runOptions) error {
+	zones, err := loadZones(o.zonesPath)
+	if err != nil {
+		return err
+	}
+	flows, err := loadFlows(o.flowsPath, o.zonesPath)
+	if err != nil {
+		return err
+	}
+
+	// Les zones d'exemple n'ont pas d'IPv6 avant attribution ; on en tire une
+	// jetable pour que l'affichage soit représentatif.
+	alloc, err := network.NewAllocation()
+	if err != nil {
+		return err
+	}
+	for i := range zones {
+		if err := alloc.ResolveZoneIPv6(&zones[i]); err != nil {
+			return err
+		}
+	}
+
+	fw := network.NewFirewall(log, o.uplink, "")
+	ruleset, err := fw.Ruleset(network.Policy{Zones: zones, Flows: flows})
+	if err != nil {
+		return err
+	}
+	fmt.Print(ruleset)
+	return nil
+}
+
+// loadFlows lit les flux depuis un fichier JSON.
+//
+// Sans fichier de flux, le comportement dépend des zones. Avec les zones
+// d'exemple, les flux d'exemple vont avec. Avec des zones explicites, aucun
+// flux n'est autorisé : pour un pare-feu, le défaut doit toujours être le
+// refus, jamais une liste héritée qui ne correspond à rien.
+func loadFlows(path, zonesPath string) ([]network.Flow, error) {
+	if path == "" {
+		if zonesPath == "" {
+			return network.ExampleFlows(), nil
+		}
+		return nil, nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("lecture des flux %s : %w", path, err)
+	}
+	var flows []network.Flow
+	if err := json.Unmarshal(data, &flows); err != nil {
+		return nil, fmt.Errorf("flux %s illisibles : %w", path, err)
+	}
+	return flows, nil
 }
 
 // loadZones lit les zones depuis un fichier JSON, ou renvoie celles d'exemple.

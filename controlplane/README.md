@@ -23,15 +23,15 @@ le client, il n'y a que l'API.
 
 ## État d'avancement
 
-Phase 2, lots A et B1 : interface `VMM`, implémentation Firecracker, machine d'état,
-supervision, magasin d'état, zones réseau et adressage double pile. Pas encore d'API ni de
-pare-feu : le démon prend ses zones et ses VM sur la ligne de commande.
+Phase 2, lots A, B1 et B2 : interface `VMM`, implémentation Firecracker, machine d'état,
+supervision, magasin d'état, zones réseau, adressage double pile et pare-feu.
+Pas encore d'API : le démon prend ses zones, ses flux et ses VM sur la ligne de commande.
 
 | Lot | Contenu | État |
 |---|---|---|
 | A | `VMM`, Firecracker sous `jailer`, machine d'état, relance auto, magasin d'état | fait |
 | B1 | Zones, bridges et tap par netlink, adressage double pile | fait |
-| B2 | Pare-feu nftables « tout refuser » et flux déclarés | à faire |
+| B2 | Pare-feu nftables « tout refuser » et flux déclarés | fait |
 | C | Schéma `tinyvmos.yaml`, validation, réconciliation, `--dry-run` | à faire |
 | D | `openapi.yaml`, REST et WebSocket, TLS, authentification par appareil, rôles | à faire |
 | E | Journal d'audit chaîné par hachage | à faire |
