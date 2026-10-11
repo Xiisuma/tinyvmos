@@ -95,6 +95,16 @@ func NewFirecracker(runDir, chrootBaseDir string, log *slog.Logger) (*Firecracke
 	return f, nil
 }
 
+// JailUserIDs renvoie l'uid et le gid de l'utilisateur confine sous lequel
+// tournent les VM.
+//
+// Expose parce que le gestionnaire de reseau en a besoin : l'interface tap doit
+// appartenir a cet utilisateur, sinon Firecracker confine ne peut pas l'ouvrir.
+// Le paquet network ne peut pas importer vm, qui l'importe deja.
+func JailUserIDs() (int, int, error) {
+	return lookupJailUser()
+}
+
 func lookupJailUser() (int, int, error) {
 	u, err := user.Lookup(JailUser)
 	if err != nil {
@@ -140,6 +150,16 @@ func kernelArgs(spec Spec) string {
 	if spec.Gateway != "" {
 		args += fmt.Sprintf(" tinyvmos.gw=%s", spec.Gateway)
 	}
+
+	// Le paramètre ip= du noyau ne sait traiter que l'IPv4. L'adressage IPv6
+	// est donc passé par tinyvmos.ip6, relu par le service tinyvmos-net de
+	// l'image, qui le pose avec ifupdown.
+	if spec.IPv6 != "" {
+		args += fmt.Sprintf(" tinyvmos.ip6=%s", spec.IPv6)
+	}
+	if spec.GatewayV6 != "" {
+		args += fmt.Sprintf(" tinyvmos.gw6=%s", spec.GatewayV6)
+	}
 	return args
 }
 
@@ -151,8 +171,13 @@ func (f *Firecracker) Create(ctx context.Context, spec Spec) error {
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if _, exists := f.machines[spec.Name]; exists {
-		return fmt.Errorf("vm %s déjà présente", spec.Name)
+	// Une VM déjà préparée peut l'être de nouveau tant qu'elle ne tourne pas :
+	// c'est ce qui permet au démon de reprendre, après son propre redémarrage,
+	// une VM que l'état connaît mais que ce processus n'a jamais vue.
+	if existing, exists := f.machines[spec.Name]; exists {
+		if existing.machine != nil {
+			return fmt.Errorf("vm %s déjà démarrée : l'arrêter avant de la préparer de nouveau", spec.Name)
+		}
 	}
 
 	runDir := f.vmRunDir(spec.Name)

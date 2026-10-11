@@ -21,14 +21,16 @@ need_root
 
 SERVICE="web-apache"
 VM="web1"
-BRIDGE="br-test2"
-TAP="tap-test2"
-CIDR="10.42.98.1/24"
+ZONE="t2a"
+BRIDGE="br-t2a"
+# L'adressage n'est plus indiqué à la main : la zone l'attribue. Cette adresse
+# est celle que le démon doit nécessairement donner à la première VM de la zone,
+# l'hôte prenant .1.
 GUEST_IP="10.42.98.2"
-GATEWAY="10.42.98.1"
 
 TEST_RUN="${OUTPUT_DIR}/test-phase2a"
 STATE_FILE="${TEST_RUN}/state.json"
+ZONES_FILE="${TEST_RUN}/zones.json"
 JAIL_DIR="${TEST_RUN}/jail"
 DAEMON_LOG="${TEST_RUN}/tinyvmosd.log"
 DAEMON_BIN="${OUTPUT_DIR}/bin/tinyvmosd"
@@ -53,7 +55,10 @@ cleanup() {
         kill -9 "$DAEMON_PID" 2>/dev/null || true
     fi
     pkill -x firecracker 2>/dev/null || true
-    "${REPO_ROOT}/build/net-setup.sh" down --bridge "$BRIDGE" --tap "$TAP" >/dev/null 2>&1 || true
+    # Le démon nettoie son réseau à l'arrêt propre, mais pas s'il est tué de
+    # force : on repasse derrière.
+    ip link del "tap-${VM}" 2>/dev/null || true
+    ip link del "$BRIDGE" 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -87,8 +92,14 @@ rm -rf "$TEST_RUN"
 mkdir -p "$TEST_RUN"
 
 cleanup
-"${REPO_ROOT}/build/net-setup.sh" up --bridge "$BRIDGE" --tap "$TAP" --cidr "$CIDR" >/dev/null \
-    || die "mise en place du réseau de test impossible"
+
+# Une zone propre au test. Le démon crée le bridge et l'interface tap lui-même,
+# et attribue l'adressage : rien n'est posé à la main ici.
+cat > "$ZONES_FILE" <<ZONES
+[
+  {"name": "${ZONE}", "ipv4": "10.42.98.0/24", "comment": "zone du test du lot A"}
+]
+ZONES
 
 # ------------------------------------------------------- Démarrage du démon
 
@@ -101,8 +112,9 @@ setsid "$DAEMON_BIN" \
     -state "$STATE_FILE" \
     -run-dir "${TEST_RUN}/run" \
     -jail-dir "$JAIL_DIR" \
+    -zones "$ZONES_FILE" \
     -log-level debug \
-    -vm "name=${VM},service=${SERVICE},tap=${TAP},ip=${GUEST_IP}/24,gw=${GATEWAY},mem=256,restart=true" \
+    -vm "name=${VM},service=${SERVICE},zone=${ZONE},mem=256,restart=true" \
     < /dev/null > "$DAEMON_LOG" 2>&1 &
 DAEMON_PID=$!
 

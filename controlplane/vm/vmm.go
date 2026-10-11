@@ -72,6 +72,12 @@ type Spec struct {
 	IP      string `json:"ip"`
 	Gateway string `json:"gateway"`
 
+	// IPv6 et GatewayV6 portent l'adressage de la seconde famille, en CIDR
+	// également. Les deux familles sont gérées : un IPv6 laissé sans
+	// configuration n'est pas neutre, il contourne les règles IPv4.
+	IPv6      string `json:"ipv6,omitempty"`
+	GatewayV6 string `json:"gateway_v6,omitempty"`
+
 	// Restart demande au superviseur de relancer la VM si elle s'arrête sans
 	// qu'on le lui ait demandé.
 	Restart bool `json:"restart"`
@@ -120,6 +126,24 @@ func (s Spec) Validate() error {
 	}
 	if s.Gateway != "" && net.ParseIP(s.Gateway) == nil {
 		return fmt.Errorf("vm %s : passerelle invalide %q", s.Name, s.Gateway)
+	}
+	if s.IPv6 != "" {
+		addr, _, err := net.ParseCIDR(s.IPv6)
+		if err != nil {
+			return fmt.Errorf("vm %s : adresse IPv6 invalide %q, un CIDR est attendu comme fd42:1::2/64", s.Name, s.IPv6)
+		}
+		if addr.To4() != nil {
+			return fmt.Errorf("vm %s : %q est une adresse IPv4 dans le champ IPv6", s.Name, s.IPv6)
+		}
+	}
+	if s.GatewayV6 != "" {
+		addr := net.ParseIP(s.GatewayV6)
+		if addr == nil {
+			return fmt.Errorf("vm %s : passerelle IPv6 invalide %q", s.Name, s.GatewayV6)
+		}
+		if addr.To4() != nil {
+			return fmt.Errorf("vm %s : %q est une adresse IPv4 dans le champ GatewayV6", s.Name, s.GatewayV6)
+		}
 	}
 	return nil
 }

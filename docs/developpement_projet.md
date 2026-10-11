@@ -148,7 +148,7 @@ La machine de développement (Ryzen 7 260, 15,29 Go de RAM, RTX 5050 8 Go) n'est
 - [x] Tests unitaires avec `vm.FakeVMM` : machine d'état, supervision et temporisation exercées sans KVM ni Firecracker, donc aussi dans la CI.
 
 ### 2.3 Plan d'adressage et zones
-- [ ] Figer le plan d'adressage interne :
+- [x] Plan d'adressage figé, avec une nuance : **les zones sont déclarées par l'utilisateur**, pas codées en dur. Les cinq ci-dessous sont la configuration d'exemple (`tinyvmosd -print-zones`). **IPv6 est géré en double pile** : chaque zone reçoit un /64 taillé dans un préfixe local unique /48 tiré à l'installation.
 
 | Zone | Bridge | Sous-réseau | Sortie Internet |
 |---|---|---|---|
@@ -158,9 +158,9 @@ La machine de développement (Ryzen 7 260, 15,29 Go de RAM, RTX 5050 8 Go) n'est
 | Données | `br-data` | `10.42.30.0/24` | **Non** |
 | IA | `br-ia` | `10.42.40.0/24` | **Non, jamais** |
 
-- [ ] Le port physique du serveur reçoit son IP par DHCP depuis le routeur de l'événement : c'est l'« IP principale ».
-- [ ] Création programmatique des bridges et des tap via `vishvananda/netlink`.
-- [ ] Une IP par micro-VM, attribuée de façon déterministe à partir de son nom.
+- [ ] Le port physique du serveur reçoit son IP par DHCP depuis le routeur : c'est l'« IP principale ». **À faire au lot B2**, avec la publication des services vers l'extérieur.
+- [x] Bridges et interfaces tap créés par `vishvananda/netlink`. Opérations idempotentes, pour que la boucle de réconciliation du lot C puisse les appeler à chaque passe.
+- [x] Une adresse par micro-VM dans chaque famille, **attribuée et enregistrée** plutôt que dérivée du nom : un hachage entrerait en collision tôt ou tard, et sans bruit. Le test vérifie la stabilité après redémarrage du démon.
 
 ### 2.4 Pare-feu et flux
 - [ ] Générer les règles nftables via `google/nftables` (pas d'appel au binaire `nft`).
