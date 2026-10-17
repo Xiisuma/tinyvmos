@@ -242,6 +242,37 @@ l'intervention que l'abandon réclamait. Sans cette remise à zéro, une VM aban
 fois le resterait, et le compteur la ferait abandonner de nouveau au premier incident
 suivant.
 
+## Le journal de console est borné
+
+Le journal de console série est la seule fenêtre sur ce qui se passe dans une micro-VM, et
+la seule façon de diagnostiquer un démarrage qui échoue. Il était écrit en ajout, **sans
+aucune limite**.
+
+Une VM bavarde, un noyau qui répète la même erreur, un service qui boucle : le fichier
+grossit jusqu'à remplir la partition. Sur une machine modeste c'est tout le système qui
+tombe — le démon ne peut plus écrire son état, nftables ne peut plus recharger, et la
+panne d'une seule VM devient la panne de la machine.
+
+Par défaut, **4 Mio par journal et un fichier conservé**, soit 8 Mio par VM. Les valeurs
+sont basses à dessein : trente VM font déjà 240 Mio, et le disque d'une machine modeste
+n'est pas extensible. `-console-max-size` et `-console-keep` les ajustent.
+
+La rotation est faite dans le démon plutôt que confiée à logrotate. D'abord parce qu'un
+outil externe ne doit pas être nécessaire au bon fonctionnement du démon sur une machine
+qu'on veut minimale. Ensuite parce que le fichier est tenu ouvert par le processus qui
+écrit : logrotate devrait passer par `copytruncate`, qui perd les lignes écrites entre la
+copie et la troncature.
+
+**Le journal est confié au SDK comme `io.Writer`, pas comme `*os.File`**, et ce détail
+porte deux propriétés. `os/exec` interpose alors un tube et une goroutine de recopie, donc
+le processus confiné n'hérite jamais d'un descripteur vers le fichier : la rotation est
+sûre, personne d'autre ne le tient ouvert. Et le journal reste la propriété de root en
+0600, alors que l'ancien code le donnait à l'identité de la VM — une VM ne peut plus
+relire ni réécrire la trace de ce qu'elle a fait.
+
+Une écriture plus grosse que le plafond passe quand même, entière : tronquer un message
+perdrait précisément la ligne qu'on cherche.
+
 ## Règles qui ne se négocient pas
 
 - **Toute VM est lancée via `jailer`, sous sa propre identité.** Jamais Firecracker en

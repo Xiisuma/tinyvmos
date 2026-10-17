@@ -79,6 +79,11 @@ func main() {
 		hostRes   = flag.Int64("host-reserve", 0,
 			"mémoire en Mio laissée à la machine elle-même. 0 applique la règle par défaut :\n"+
 				"  le plus élevé entre 512 Mio et 10 % de la mémoire installée")
+		consoleMax = flag.Int64("console-max-size", vm.ConsoleMaxBytes/(1<<20),
+			"taille en Mio au-delà de laquelle le journal de console d'une vm est mis de côté")
+		consoleKeep = flag.Int("console-keep", vm.ConsoleKeep,
+			"nombre de journaux de console conservés par vm, en plus du courant.\n"+
+				"  Chaque fichier se paie par vm : trente vm font trente fois ce volume")
 		maxVMs = flag.Int("max-vms", vm.DefaultMaxVMs,
 			"plafond du nombre de vm déclarées. Garde-fou contre une configuration engendrée\n"+
 				"  en boucle : sur toute machine réelle, la mémoire refusera bien avant")
@@ -124,6 +129,8 @@ func main() {
 		keepNet:   *keepNet,
 		hostRes:   *hostRes,
 		maxVMs:    *maxVMs,
+		consoleMx: *consoleMax,
+		consoleKp: *consoleKeep,
 		dumpRules: *dumpRules,
 	}
 	if err := run(log, opts); err != nil {
@@ -154,6 +161,8 @@ type runOptions struct {
 	keepNet   bool
 	hostRes   int64
 	maxVMs    int
+	consoleMx int64
+	consoleKp int
 	dumpRules bool
 }
 
@@ -234,6 +243,12 @@ func run(log *slog.Logger, o runOptions) error {
 	hypervisor, err := vm.NewFirecracker(o.runDir, jailDir, log)
 	if err != nil {
 		return err
+	}
+	if o.consoleMx > 0 {
+		hypervisor.ConsoleMaxBytes = o.consoleMx * (1 << 20)
+	}
+	if o.consoleKp >= 0 {
+		hypervisor.ConsoleKeep = o.consoleKp
 	}
 	mgr, err := vm.NewManager(hypervisor, store, log)
 	if err != nil {
