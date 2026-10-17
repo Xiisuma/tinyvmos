@@ -155,6 +155,61 @@ silence ; monter le numéro fait qu'un démon antérieur refuse de repartir sur 
 lieu de le lire sans vérifier aucune empreinte. Un retour en arrière qui désactive la
 vérification sans le dire est précisément ce qu'il faut éviter.
 
+## Ce que la machine peut porter
+
+Rien n'empêchait de déclarer dix VM à 2 Gio sur une machine qui en a 8. Les premières
+démarraient, les suivantes aussi, et c'est le tueur de mémoire du noyau qui tranchait —
+au hasard, souvent sur autre chose que la VM fautive, parfois sur le démon lui-même.
+
+La mémoire et le processeur ne se traitent pas de la même façon, et c'est le point à
+retenir.
+
+**La mémoire ne se partage pas.** Firecracker ne fait ni ballon ni surréservation : les
+Mio promis à une VM lui sont promis pour de bon. Une somme qui dépasse est donc une
+erreur, et elle est refusée.
+
+**Le processeur se partage.** Trente VM sur quatre cœurs fonctionnent, elles sont
+simplement plus lentes. Le surengagement est signalé, pas refusé. Une seule chose est
+refusée côté processeur : une VM qui demande plus de cœurs virtuels que la machine n'a de
+cœurs, parce qu'elle ne gagnerait rien et perdrait du temps en contention.
+
+Le calcul compte trois termes, pas un :
+
+| Terme | Valeur | Pourquoi |
+|---|---|---|
+| Budgets déclarés | somme des `mem=` | Ce que les invités reçoivent |
+| Surcoût des processus | 16 Mio par VM | Tables de pages, pile du VMM, tampons des périphériques virtuels |
+| Réserve de la machine | `max(512 Mio, 10 %)` | Noyau, démon, nftables, accès d'administration |
+
+La réserve est un plancher **et** un pourcentage : un pourcentage seul est trop faible sur
+une petite machine, un montant fixe trop faible sur une grande. `-host-reserve` l'impose à
+la main sur une machine qui ne fait vraiment rien d'autre.
+
+Le contrôle porte sur **l'ensemble** des VM déclarées, et il a lieu avant qu'un seul
+bridge ne soit posé. Accepter les six premières puis refuser la septième laisserait six
+interfaces tap et six jails derrière soi, pour un déploiement de toute façon invalide.
+
+```
+msg="budget de la machine" vm=2 mémoire_demandée_mio=512 surcoût_mio=32 \
+  réserve_hôte_mio=994 mémoire_installée_mio=9945 libre_après_mio=8407 \
+  cœurs_virtuels=2 cœurs_réels=8
+```
+
+Un refus donne les chiffres, pas seulement le verdict :
+
+```
+capacité de la machine : le déploiement demande 99999 Mio pour 1 vm, plus 16 Mio de
+surcoût des processus et 994 Mio réservés à la machine, soit 101009 Mio sur les 9945 Mio
+installés. Il manque 91064 Mio.
+```
+
+**Ce sont des plafonds d'admission, pas des contraintes.** Ils empêchent de déclarer
+l'impossible ; ils n'empêchent pas un processus Firecracker de déborder du budget annoncé.
+Poser une limite dure par cgroup sur chaque VM est la suite logique — `jailer --cgroup
+memory.max=…` sait le faire — mais elle demande d'être mesurée sur une vraie charge avant
+d'être posée : un plafond trop serré ferait tuer des VM saines. C'est à traiter avec le
+test à l'échelle.
+
 ## Règles qui ne se négocient pas
 
 - **Toute VM est lancée via `jailer`, sous sa propre identité.** Jamais Firecracker en
@@ -173,7 +228,8 @@ vérification sans le dire est précisément ce qu'il faut éviter.
   avertissement.
 - Le contrat `api/openapi.yaml` sera écrit **avant** le code, et les clients en seront
   générés. Aucun client d'API écrit à la main.
-- Un déploiement qui dépasse la RAM disponible sera refusé, plutôt que laissé à l'OOM killer.
+- **Un déploiement qui dépasse la mémoire installée est refusé**, plutôt que laissé au
+  tueur de mémoire du noyau. Le refus a lieu avant qu'un bridge ne soit posé.
 
 ## Trois pièges d'intégration, et leur raison
 

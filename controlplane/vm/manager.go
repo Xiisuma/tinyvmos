@@ -34,6 +34,13 @@ type Manager struct {
 	log   *slog.Logger
 	clock func() time.Time
 
+	// host et capacity portent les plafonds de ressources. Ils sont relevés à
+	// la construction : la mémoire installée ne change pas en cours de route,
+	// et la relire à chaque opération donnerait des refus qui dépendent de
+	// l'instant où on regarde.
+	host     HostResources
+	capacity CapacityPolicy
+
 	mu    sync.Mutex
 	snap  *Snapshot
 	super map[string]*supervision
@@ -53,14 +60,68 @@ func NewManager(vmm VMM, store Store, log *slog.Logger) (*Manager, error) {
 	if err != nil {
 		return nil, err
 	}
+	host, err := ReadHostResources()
+	if err != nil {
+		return nil, err
+	}
 	return &Manager{
-		vmm:   vmm,
-		store: store,
-		log:   log,
-		clock: time.Now,
-		snap:  snap,
-		super: map[string]*supervision{},
+		vmm:      vmm,
+		store:    store,
+		log:      log,
+		clock:    time.Now,
+		host:     host,
+		capacity: DefaultCapacityPolicy(),
+		snap:     snap,
+		super:    map[string]*supervision{},
 	}, nil
+}
+
+// SetCapacity remplace les plafonds par défaut.
+func (m *Manager) SetCapacity(p CapacityPolicy) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.capacity = p
+}
+
+// Host renvoie les ressources relevées sur la machine.
+func (m *Manager) Host() HostResources { return m.host }
+
+// Capacity renvoie les plafonds en vigueur.
+func (m *Manager) Capacity() CapacityPolicy {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.capacity
+}
+
+// admitLocked vérifie que la machine peut porter l'ensemble des VM déclarées,
+// celle qu'on ajoute comprise.
+//
+// Le contrôle porte sur l'ensemble, pas sur la seule VM qui arrive : c'est la
+// somme qui dépasse, jamais une VM isolée. La VM homonyme est exclue du total
+// pour qu'une redéclaration ne se compte pas deux fois.
+//
+// Le verrou doit être tenu.
+func (m *Manager) admitLocked(spec Spec) error {
+	budgets := []Budget{{Name: spec.Name, VCPU: spec.VCPU, MemMiB: spec.MemMiB}}
+	for nom, rec := range m.snap.VMs {
+		if nom == spec.Name {
+			continue
+		}
+		budgets = append(budgets, Budget{
+			Name:   rec.Spec.Name,
+			VCPU:   rec.Spec.VCPU,
+			MemMiB: rec.Spec.MemMiB,
+		})
+	}
+
+	rapport, err := m.capacity.Admit(m.host, budgets)
+	if err != nil {
+		return err
+	}
+	for _, avertissement := range rapport.Warnings {
+		m.log.Warn(avertissement, "vm", spec.Name)
+	}
+	return nil
 }
 
 // persistLocked écrit l'état. Appelée une fois par opération publique, jamais
@@ -140,6 +201,9 @@ func (m *Manager) Create(ctx context.Context, spec Spec) error {
 	if _, exists := m.snap.VMs[spec.Name]; exists {
 		return fmt.Errorf("vm %s déjà déclarée", spec.Name)
 	}
+	if err := m.admitLocked(spec); err != nil {
+		return err
+	}
 	if err := m.verifyArtifactsLocked(spec); err != nil {
 		return err
 	}
@@ -172,6 +236,10 @@ func (m *Manager) Ensure(ctx context.Context, spec Spec) error {
 	}
 
 	m.mu.Lock()
+	if err := m.admitLocked(spec); err != nil {
+		m.mu.Unlock()
+		return err
+	}
 	if err := m.verifyArtifactsLocked(spec); err != nil {
 		m.mu.Unlock()
 		return err

@@ -76,6 +76,12 @@ func main() {
 		dumpFlows = flag.Bool("print-flows", false, "affiche les flux d'exemple en JSON et quitte")
 		dumpRules = flag.Bool("print-ruleset", false, "affiche le jeu de règles nftables qui serait appliqué et quitte")
 		keepNet   = flag.Bool("keep-network", false, "conserve bridges et interfaces tap à l'extinction")
+		hostRes   = flag.Int64("host-reserve", 0,
+			"mémoire en Mio laissée à la machine elle-même. 0 applique la règle par défaut :\n"+
+				"  le plus élevé entre 512 Mio et 10 % de la mémoire installée")
+		maxVMs = flag.Int("max-vms", vm.DefaultMaxVMs,
+			"plafond du nombre de vm déclarées. Garde-fou contre une configuration engendrée\n"+
+				"  en boucle : sur toute machine réelle, la mémoire refusera bien avant")
 	)
 	flag.Var(&vms, "vm", "vm à faire tourner, répétable. Forme :\n"+
 		"  name=web1,service=web-apache,zone=publique[,vcpu=1][,mem=256][,restart=true]\n"+
@@ -116,6 +122,8 @@ func main() {
 		vms:       vms,
 		listOnly:  *listOnly,
 		keepNet:   *keepNet,
+		hostRes:   *hostRes,
+		maxVMs:    *maxVMs,
 		dumpRules: *dumpRules,
 	}
 	if err := run(log, opts); err != nil {
@@ -144,6 +152,8 @@ type runOptions struct {
 	vms       []string
 	listOnly  bool
 	keepNet   bool
+	hostRes   int64
+	maxVMs    int
 	dumpRules bool
 }
 
@@ -229,6 +239,36 @@ func run(log *slog.Logger, o runOptions) error {
 	if err != nil {
 		return err
 	}
+	// Les plafonds de ressources sont appliqués avant qu'un seul bridge ne
+	// soit posé. Refuser à la septième vm après en avoir démarré six
+	// laisserait six interfaces tap et six jails derrière soi, pour un
+	// déploiement de toute façon invalide.
+	capacite := vm.DefaultCapacityPolicy()
+	capacite.HostReserveMiB = o.hostRes
+	capacite.MaxVMs = o.maxVMs
+	mgr.SetCapacity(capacite)
+
+	budgets := make([]vm.Budget, 0, len(requests))
+	for _, r := range requests {
+		budgets = append(budgets, vm.Budget{Name: r.Name, VCPU: r.VCPU, MemMiB: r.MemMiB})
+	}
+	rapport, err := capacite.Admit(mgr.Host(), budgets)
+	if err != nil {
+		return err
+	}
+	for _, avertissement := range rapport.Warnings {
+		log.Warn(avertissement)
+	}
+	log.Info("budget de la machine",
+		"vm", rapport.VMs,
+		"mémoire_demandée_mio", rapport.MemRequested,
+		"surcoût_mio", rapport.MemOverhead,
+		"réserve_hôte_mio", rapport.MemReserved,
+		"mémoire_installée_mio", rapport.MemTotal,
+		"libre_après_mio", rapport.MemFree(),
+		"cœurs_virtuels", rapport.VCPURequested,
+		"cœurs_réels", rapport.CPUs)
+
 	netMgr := network.NewManager(log)
 	firewall := network.NewFirewall(log, o.uplink, filepath.Join(o.runDir, "ruleset.nft"))
 
