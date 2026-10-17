@@ -539,25 +539,90 @@ func printRuleset(log *slog.Logger, o runOptions) error {
 		return err
 	}
 
-	// Les zones d'exemple n'ont pas d'IPv6 avant attribution ; on en tire une
-	// jetable pour que l'affichage soit représentatif.
-	alloc, err := network.NewAllocation()
+	pubs, err := loadPublications(o.pubsPath)
 	if err != nil {
 		return err
 	}
+
+	// Les adresses viennent de l'état, pas d'un tirage jetable.
+	//
+	// La première version tirait un préfixe local unique neuf à chaque appel :
+	// les adresses IPv6 affichées n'étaient celles de personne, et surtout pas
+	// celles qui allaient être appliquées. Sur un pare-feu, lire autre chose
+	// que ce qui sera posé est pire que ne rien lire — l'opérateur croit avoir
+	// vérifié.
+	//
+	// L'état est lu sans droits root : il peut être absent ou illisible ici,
+	// et ce n'est pas une erreur, c'est le cas du tout premier démarrage.
+	alloc := stateAllocation(o.statePath)
+	source := "état " + o.statePath
+	if alloc == nil {
+		// Rien à lire : il faut bien montrer quelque chose, mais il faut dire
+		// que ce n'est qu'une illustration.
+		if alloc, err = network.NewAllocation(); err != nil {
+			return err
+		}
+		source = "préfixe tiré pour cet aperçu, ce n'est PAS celui qui sera appliqué"
+	}
+
 	for i := range zones {
 		if err := alloc.ResolveZoneIPv6(&zones[i]); err != nil {
 			return err
 		}
 	}
 
+	leases := map[string]network.Lease{}
+	for nom, bail := range alloc.Leases {
+		if bail != nil {
+			leases[nom] = *bail
+		}
+	}
+
+	// Les publications ne sont montrées que si les adresses des vm sont
+	// connues : une redirection vers une adresse inventée induirait en erreur
+	// exactement comme le préfixe jetable.
+	politique := network.Policy{Zones: zones, Flows: flows}
+	note := ""
+	switch {
+	case len(pubs) == 0:
+	case len(leases) == 0:
+		note = fmt.Sprintf("%d publication(s) déclarée(s), non affichées : les adresses des vm ne sont pas encore attribuées", len(pubs))
+	default:
+		politique.Publications = pubs
+		politique.Leases = leases
+	}
+
 	fw := network.NewFirewall(log, o.uplink, "")
-	ruleset, err := fw.Ruleset(network.Policy{Zones: zones, Flows: flows})
+	ruleset, err := fw.Ruleset(politique)
 	if err != nil {
 		return err
 	}
+
+	fmt.Printf("# adressage IPv6 : %s\n", source)
+	if note != "" {
+		fmt.Printf("# %s\n", note)
+	}
 	fmt.Print(ruleset)
 	return nil
+}
+
+// stateAllocation lit l'attribution persistée, ou nil si elle n'est pas
+// lisible. L'absence d'état est le cas normal du premier démarrage, et cette
+// fonction tourne sans droits root : elle ne doit jamais faire échouer un
+// simple affichage.
+func stateAllocation(path string) *network.Allocation {
+	if path == "" {
+		return nil
+	}
+	store, err := state.NewJSONStore(path)
+	if err != nil {
+		return nil
+	}
+	snap, err := store.Load()
+	if err != nil || snap == nil {
+		return nil
+	}
+	return snap.Alloc
 }
 
 // loadPublications lit les services publiés depuis un fichier JSON.
