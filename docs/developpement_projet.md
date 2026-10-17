@@ -146,6 +146,7 @@ La machine de développement (Ryzen 7 260, 15,29 Go de RAM, RTX 5050 8 Go) n'est
 - [x] Lancement systématique via `jailer`, **une identité confinée par VM** (uid et gid dédiés dans la plage réservée 60000-60999, persistés), seccomp en mode strict. Vérifié par test, y compris par une tentative de lecture croisée entre deux VM.
 - [x] Machine d'état explicite avec table de transitions : une transition absente de la table est refusée, pas tolérée.
 - [x] Relance automatique avec temporisation doublante de 1 s à 60 s, remise à zéro après 60 s de stabilité. Un arrêt demandé ne déclenche pas de relance.
+- [x] **Abandon après dix arrêts consécutifs**, signalé par une ligne de journal au niveau erreur, le champ `gave_up_at` de l’état et une colonne `QUARANTAINE` dans `tinyvmosd -list`. Le compteur se remet à zéro sur la durée de fonctionnement et non sur un démarrage réussi : une vm qui s’écroule aussitôt relancée réussit son démarrage à chaque tour et ne serait jamais abandonnée. Un démarrage explicite lève la quarantaine.
 - [x] Tests unitaires avec `vm.FakeVMM` : machine d'état, supervision et temporisation exercées sans KVM ni Firecracker, donc aussi dans la CI.
 
 ### 2.3 Plan d'adressage et zones

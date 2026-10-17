@@ -678,11 +678,18 @@ func printState(store *state.JSONStore) error {
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "NOM\tSERVICE\tZONE\tSTATUT\tUID\tPID\tRELANCES\tIPV4\tIPV6\tERREUR")
+	fmt.Fprintln(w, "NOM\tSERVICE\tZONE\tSTATUT\tUID\tPID\tRELANCES\tQUARANTAINE\tIPV4\tIPV6\tERREUR")
 	for _, rec := range snap.VMs {
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\t%d\t%d\t%s\t%s\t%s\n",
+		// La quarantaine doit se voir ici : sinon l'abandon n'existe que dans
+		// les journaux, c'est-à-dire nulle part au moment où on cherche
+		// pourquoi un service ne répond plus.
+		quarantaine := "-"
+		if !rec.GaveUpAt.IsZero() {
+			quarantaine = rec.GaveUpAt.Format(time.RFC3339)
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\t%d\t%d\t%s\t%s\t%s\t%s\n",
 			rec.Spec.Name, rec.Spec.Service, rec.Spec.Zone,
-			rec.Status, rec.Spec.UID, rec.PID, rec.Restarts,
+			rec.Status, rec.Spec.UID, rec.PID, rec.Restarts, quarantaine,
 			rec.Spec.IP, rec.Spec.IPv6, rec.LastError)
 	}
 	return w.Flush()

@@ -29,6 +29,19 @@ type Record struct {
 	// Restarts compte les relances automatiques depuis la création.
 	Restarts int `json:"restarts"`
 
+	// ConsecutiveFailures compte les arrêts non demandés depuis la dernière
+	// période de fonctionnement stable. C'est ce compteur, et non Restarts,
+	// qui décide de l'abandon : une VM relancée cent fois en six mois va
+	// bien, une VM relancée dix fois en cinq minutes ne démarrera jamais.
+	ConsecutiveFailures int `json:"consecutive_failures,omitempty"`
+
+	// GaveUpAt est l'instant où le superviseur a cessé de relancer.
+	//
+	// Non nul veut dire que la VM est en quarantaine : plus aucune relance
+	// automatique, et il faut une intervention. Sans ce champ, l'abandon ne
+	// se verrait que dans les journaux, c'est-à-dire pas du tout.
+	GaveUpAt time.Time `json:"gave_up_at,omitempty"`
+
 	// LastError retient la dernière erreur, pour que l'opérateur n'ait pas à
 	// fouiller les journaux pour savoir pourquoi une VM est en échec.
 	LastError string `json:"last_error,omitempty"`

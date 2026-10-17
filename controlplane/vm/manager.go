@@ -19,6 +19,20 @@ const (
 	restartBackoffMin   = 1 * time.Second
 	restartBackoffMax   = 60 * time.Second
 	restartStableWindow = 60 * time.Second
+
+	// maxConsecutiveRestarts est le nombre d'arrêts non demandés consécutifs
+	// au-delà duquel le superviseur abandonne.
+	//
+	// Relancer indéfiniment une VM qui ne démarrera jamais — image cassée,
+	// service en panne au premier appel, configuration fausse — occupe le
+	// processeur, remplit le journal de console et masque la panne au milieu
+	// du bruit. Avec la temporisation doublante, dix échecs représentent près
+	// de cinq minutes : assez pour laisser passer une cause transitoire,
+	// assez peu pour ne pas boucler toute la nuit.
+	//
+	// L'abandon n'est pas définitif : un démarrage explicite lève la
+	// quarantaine.
+	maxConsecutiveRestarts = 10
 )
 
 // ErrUnknownVM est renvoyée pour une VM absente de l'état.
@@ -40,6 +54,14 @@ type Manager struct {
 	// l'instant où on regarde.
 	host     HostResources
 	capacity CapacityPolicy
+
+	// Paramètres de la supervision, champs plutôt que constantes pour que les
+	// tests puissent les réduire : vérifier un abandon au bout de dix
+	// relances prendrait cinq minutes à l'échelle réelle.
+	backoffMin   time.Duration
+	backoffMax   time.Duration
+	stableWindow time.Duration
+	maxFailures  int
 
 	mu    sync.Mutex
 	snap  *Snapshot
@@ -65,14 +87,18 @@ func NewManager(vmm VMM, store Store, log *slog.Logger) (*Manager, error) {
 		return nil, err
 	}
 	return &Manager{
-		vmm:      vmm,
-		store:    store,
-		log:      log,
-		clock:    time.Now,
-		host:     host,
-		capacity: DefaultCapacityPolicy(),
-		snap:     snap,
-		super:    map[string]*supervision{},
+		vmm:          vmm,
+		store:        store,
+		log:          log,
+		clock:        time.Now,
+		host:         host,
+		capacity:     DefaultCapacityPolicy(),
+		backoffMin:   restartBackoffMin,
+		backoffMax:   restartBackoffMax,
+		stableWindow: restartStableWindow,
+		maxFailures:  maxConsecutiveRestarts,
+		snap:         snap,
+		super:        map[string]*supervision{},
 	}, nil
 }
 
@@ -286,6 +312,16 @@ func (m *Manager) Start(ctx context.Context, name string) error {
 		m.mu.Unlock()
 		return fmt.Errorf("vm %s : transition %s vers %s interdite", name, rec.Status, StatusStarting)
 	}
+	// Un démarrage explicite lève la quarantaine : c'est l'intervention que
+	// l'abandon réclamait. Sans cette remise à zéro, une VM abandonnée une
+	// fois le resterait, et le compteur la ferait abandonner de nouveau au
+	// premier incident suivant.
+	if !rec.GaveUpAt.IsZero() {
+		m.log.Info("quarantaine levée par un démarrage explicite",
+			"vm", name, "échecs_consécutifs", rec.ConsecutiveFailures)
+	}
+	rec.GaveUpAt = time.Time{}
+	rec.ConsecutiveFailures = 0
 	rec.Status = StatusStarting
 	rec.UpdatedAt = m.clock()
 	m.mu.Unlock()
@@ -331,7 +367,7 @@ func (m *Manager) superviseLocked(name string) {
 func (m *Manager) supervise(ctx context.Context, name string, done chan struct{}) {
 	defer close(done)
 
-	backoff := restartBackoffMin
+	backoff := m.backoffMin
 
 	for {
 		waitErr := m.vmm.Wait(ctx, name)
@@ -354,10 +390,15 @@ func (m *Manager) supervise(ctx context.Context, name string, done chan struct{}
 			return
 		}
 
+		// Une VM qui a tenu assez longtemps repart de zéro : sa panne n'a
+		// rien à voir avec celles d'hier, et la compter avec elles finirait
+		// par mettre en quarantaine un service qui tourne depuis des mois.
 		uptime := m.clock().Sub(rec.UpdatedAt)
-		if uptime >= restartStableWindow {
-			backoff = restartBackoffMin
+		if uptime >= m.stableWindow {
+			backoff = m.backoffMin
+			rec.ConsecutiveFailures = 0
 		}
+		rec.ConsecutiveFailures++
 
 		cause := "arrêt inattendu de la vm"
 		if waitErr != nil {
@@ -368,13 +409,37 @@ func (m *Manager) supervise(ctx context.Context, name string, done chan struct{}
 		rec.PID = 0
 		rec.UpdatedAt = m.clock()
 		restart := rec.Spec.Restart
+		echecs := rec.ConsecutiveFailures
+
+		// Abandon : au-delà du plafond, relancer encore ne corrigera rien et
+		// masquera la panne dans le bruit. La VM reste en échec, le champ
+		// GaveUpAt dit qu'elle est en quarantaine, et plus personne ne la
+		// relance tant qu'un humain n'est pas intervenu.
+		abandon := restart && echecs >= m.maxFailures
+		if abandon {
+			rec.GaveUpAt = m.clock()
+			rec.LastError = fmt.Sprintf(
+				"abandon après %d arrêts consécutifs : %s. La relance automatique est suspendue ; "+
+					"corriger la cause puis redémarrer la vm explicitement",
+				echecs, cause)
+		}
 		_ = m.persistLocked()
 		m.mu.Unlock()
 
-		// cause et restart sont des copies : rec ne doit plus être lu hors du
-		// verrou, sinon le détecteur de course a raison de râler.
+		// cause, restart, echecs et abandon sont des copies : rec ne doit plus
+		// être lu hors du verrou, sinon le détecteur de course a raison de
+		// râler.
 		m.log.Warn("vm arrêtée sans demande",
-			"vm", name, "cause", cause, "durée_de_vie", uptime.Round(time.Millisecond))
+			"vm", name, "cause", cause,
+			"durée_de_vie", uptime.Round(time.Millisecond),
+			"échecs_consécutifs", echecs)
+
+		if abandon {
+			m.log.Error("relance abandonnée : la vm échoue en boucle",
+				"vm", name, "échecs_consécutifs", echecs, "cause", cause,
+				"remède", "corriger la cause, puis redémarrer la vm explicitement pour lever la quarantaine")
+			return
+		}
 
 		if !restart {
 			return
@@ -387,10 +452,10 @@ func (m *Manager) supervise(ctx context.Context, name string, done chan struct{}
 		case <-time.After(backoff):
 		}
 
-		if next := backoff * 2; next <= restartBackoffMax {
+		if next := backoff * 2; next <= m.backoffMax {
 			backoff = next
 		} else {
-			backoff = restartBackoffMax
+			backoff = m.backoffMax
 		}
 
 		if err := m.restart(ctx, name); err != nil {

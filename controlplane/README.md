@@ -210,6 +210,38 @@ memory.max=…` sait le faire — mais elle demande d'être mesurée sur une vra
 d'être posée : un plafond trop serré ferait tuer des VM saines. C'est à traiter avec le
 test à l'échelle.
 
+## La relance automatique abandonne, et le dit
+
+Une VM qui s'arrête sans qu'on le lui ait demandé est relancée, avec une temporisation qui
+double à chaque échec. Elle l'était **sans fin**. Une image cassée, un service qui meurt au
+premier appel, une configuration fausse : le démon relançait toutes les minutes, occupait
+le processeur, remplissait le journal de console, et noyait la panne dans le bruit.
+
+Au bout de **dix arrêts consécutifs**, le superviseur abandonne. Avec la temporisation
+doublante cela représente près de cinq minutes : assez pour laisser passer une cause
+transitoire, assez peu pour ne pas boucler toute la nuit.
+
+Le compteur qui décide est `ConsecutiveFailures`, pas le total des relances. Une VM
+relancée cent fois en six mois va bien ; une VM relancée dix fois en cinq minutes ne
+démarrera jamais.
+
+**Il se remet à zéro sur la durée de fonctionnement, pas sur un démarrage réussi.** La
+distinction est le cœur du mécanisme : une VM qui s'écroule aussitôt relancée réussit son
+démarrage à chaque tour, et remettre le compteur à zéro là rendrait l'abandon
+inatteignable. Le compteur ne repart que si la VM a tenu la fenêtre de stabilité.
+
+L'abandon se voit en trois endroits, parce qu'un abandon qui ne se voit que dans les
+journaux ne se voit pas :
+
+- une ligne de journal au niveau `error`, qui nomme la cause et le remède ;
+- le champ `gave_up_at` dans l'état ;
+- une colonne `QUARANTAINE` dans `tinyvmosd -list`.
+
+Ce n'est pas définitif. **Un démarrage explicite lève la quarantaine** — c'est
+l'intervention que l'abandon réclamait. Sans cette remise à zéro, une VM abandonnée une
+fois le resterait, et le compteur la ferait abandonner de nouveau au premier incident
+suivant.
+
 ## Règles qui ne se négocient pas
 
 - **Toute VM est lancée via `jailer`, sous sa propre identité.** Jamais Firecracker en
