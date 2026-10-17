@@ -103,6 +103,58 @@ que sur la propriété des fichiers, et on ne savait pas laquelle des deux prot�
 `tests/phase2d-identites.sh` le prouve en prenant l'identité d'une VM avec `setpriv` pour
 tenter de lire les fichiers d'une autre, et vérifie aussi qu'elle lit bien les siens.
 
+## Rien ne démarre sans que son empreinte ait été vérifiée
+
+Une micro-VM démarre sur deux fichiers : l'image de son système de fichiers et le noyau
+invité. Les deux sont du code, exécuté avec tous les droits à l'intérieur de la VM. Un
+fichier modifié entre la construction et le démarrage donne à qui l'a modifié le contenu
+entier de la VM, et le pare-feu n'y change rien : une VM est autorisée à faire ce que sa
+zone permet, quel que soit le code qu'elle exécute.
+
+Les deux niveaux de contrôle ne valent pas la même chose, et c'est le point à comprendre.
+
+**Les métadonnées de construction** (`output/images/<service>.json`) détectent une image
+corrompue — copie tronquée, disque fatigué, construction interrompue — ou remplacée par
+quelqu'un qui ignore leur existence. Elles ne protègent pas contre un attaquant attentif :
+le fichier de métadonnées se modifie aussi facilement que l'image qu'il décrit. Elles ne
+sont donc pas l'autorité.
+
+**L'empreinte retenue dans l'état du démon** l'est. Elle est enregistrée à la première
+utilisation de l'artefact, puis comparée à chaque démarrage suivant. Elle vit dans le
+fichier d'état, écrit par le démon et lisible de lui seul : modifier une image dans le
+catalogue ne suffit plus, il faut aussi atteindre l'état.
+
+C'est de la confiance à la première utilisation, le même compromis que les clés d'hôte
+SSH, avec la même limite : la première fois, on fait confiance. Une signature du catalogue
+la lèverait ; elle demande une clé, donc une gestion de clé, et c'est le sujet de la
+distribution des images.
+
+La vérification a lieu dans le gestionnaire, **avant** `vmm.Create`, donc avant que
+l'artefact ne soit copié dans le dossier de travail de la VM : c'est le fichier du
+catalogue qui est vérifié, celui qui serait modifié. Vérifier la copie n'aurait rien
+prouvé, puisque c'est nous qui venons de la faire.
+
+Conséquence voulue : **une image reconstruite ne démarre plus.** Son empreinte a changé,
+et c'est exactement ce que le dispositif doit signaler.
+
+```bash
+sudo ./output/bin/tinyvmosd -state /var/lib/tinyvmos/state.json \
+  -trust /chemin/vers/output/images/web-apache.ext4
+```
+
+Sans cette échappatoire, la seule issue serait de supprimer l'état, ce qui emporterait
+aussi les adresses attribuées et les identités confinées. `-trust` se passe démon arrêté :
+un démon en marche réécrirait l'état depuis sa copie en mémoire.
+
+`tinyvmosd -list` affiche les empreintes retenues et leur origine — métadonnées de
+construction, première utilisation, ou acceptation par l'opérateur. Sans cette
+information, impossible de savoir ce que la vérification vaut.
+
+Le schéma d'état passe en version 2. Le champ est optionnel et aurait pu être ajouté en
+silence ; monter le numéro fait qu'un démon antérieur refuse de repartir sur cet état, au
+lieu de le lire sans vérifier aucune empreinte. Un retour en arrière qui désactive la
+vérification sans le dire est précisément ce qu'il faut éviter.
+
 ## Règles qui ne se négocient pas
 
 - **Toute VM est lancée via `jailer`, sous sa propre identité.** Jamais Firecracker en
@@ -116,6 +168,9 @@ tenter de lire les fichiers d'une autre, et vérifie aussi qu'elle lit bien les 
   `cp --reflink=auto --sparse=always`, donc instantanée et sans coût disque sur btrfs ou
   xfs, et limitée à l'occupation réelle ailleurs.
 - L'image du catalogue n'est jamais modifiée. C'est ce qui rend les images jetables.
+- **Aucun artefact ne démarre sans que son empreinte ait été vérifiée**, image comme
+  noyau. Un fichier dont l'empreinte a changé arrête le démon, il ne produit pas un
+  avertissement.
 - Le contrat `api/openapi.yaml` sera écrit **avant** le code, et les clients en seront
   générés. Aucun client d'API écrit à la main.
 - Un déploiement qui dépasse la RAM disponible sera refusé, plutôt que laissé à l'OOM killer.

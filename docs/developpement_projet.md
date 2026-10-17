@@ -111,6 +111,7 @@ La machine de développement (Ryzen 7 260, 15,29 Go de RAM, RTX 5050 8 Go) n'est
 - [x] Constructeur générique `images/build-image.sh` plutôt qu'un script par service : il lit `images/<service>/image.conf` et sera réutilisé tel quel pour tout le catalogue de la Phase 6.
 - [x] Apache démarré par OpenRC au boot, page de test servie.
 - [x] Image reproductible : versions Alpine et noyau figées, empreintes SHA-256 vérifiées au téléchargement, empreinte de l'image consignée dans son fichier de métadonnées.
+- [x] **Empreinte vérifiée avant tout démarrage**, image comme noyau invité. L'autorité est l'empreinte retenue dans l'état du démon, enregistrée à la première utilisation et comparée ensuite ; les métadonnées de construction ne sont qu'un contrôle d'appoint, puisqu'elles se modifient aussi facilement que l'image. Une image reconstruite ne démarre plus tant qu'un opérateur n'a pas passé `-trust`. Vérifié par test, y compris le cas d'une image modifiée dont les métadonnées ont été mises à jour en même temps.
 
 ### 1.3 Réseau virtuel minimal
 - [x] `build/net-setup.sh` crée le bridge et l'interface tap, avec un garde-fou qui refuse un sous-réseau déjà routé par une autre interface.
