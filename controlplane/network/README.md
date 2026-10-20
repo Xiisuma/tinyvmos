@@ -220,3 +220,49 @@ Conséquence observée : le routage IPv6 entre zones ne fonctionnait pas alors q
 fonctionnait. Une panne dissymétrique de ce genre coûte cher à diagnostiquer, parce que
 tout semble correct. Le réglage est donc posé sur chaque bridge au moment de sa création,
 et `default/forwarding` est écrit en plus.
+
+## L'hôte aussi est filtré vers les zones
+
+Les deux sens étaient traités, sauf un : ce que l'**hôte** envoie aux zones. Il pouvait
+joindre n'importe quelle VM sur n'importe quel port, et un flux `from: host` déclaré ne
+produisait **aucune règle** — il était silencieusement ignoré, ce qui est pire que de ne
+pas exister.
+
+Il faut être précis sur ce que ce filtrage apporte, parce que la tentation est de croire
+qu'il protège de plus qu'il ne protège.
+
+**Il ne contient pas un attaquant qui a déjà root sur l'hôte.** Rien dans nftables ne le
+pourrait : root vide la table. Ce qu'il contient, c'est un **service non privilégié
+compromis** sur la machine — un serveur web, un agent, n'importe quoi qui tourne sous son
+propre compte — et les accidents de configuration. Dans une architecture où une VM égale
+un service, l'hôte qui joint toutes les zones sans contrainte est précisément le pivot qui
+annule le cloisonnement.
+
+D'où la règle centrale de la chaîne `output` :
+
+```
+oifname @zones meta skuid 0 counter accept
+```
+
+Le trafic émis par un processus de root passe — l'opérateur qui diagnostique, le démon
+lui-même. Celui de tout autre compte est refusé, sauf flux déclaré. Un `curl` de
+dépannage fonctionne donc normalement, et c'est voulu : un filtrage qui gêne l'opérateur
+finit désactivé.
+
+Trois choses passent toujours, et il y a une raison à chacune :
+
+| Règle | Pourquoi |
+|---|---|
+| `ct state established,related` | Les retours des connexions que la chaîne `input` a déjà autorisées |
+| ICMP et ICMPv6 | Découverte de voisins (sans elle IPv6 ne fonctionne pas), découverte du MTU, et le ping, qui est la première chose qu'on tente |
+| `tcp flags rst` vers une zone | Un RST engendré par le noyau n'a pas de socket, donc pas de propriétaire : le jeter transformerait un refus franc en attente sans fin côté VM |
+
+La politique de la chaîne reste `accept`, comme pour `forward` et `input` : la mettre à
+`drop` couperait tout le trafic sortant de la machine, y compris celui qui ne nous
+concerne pas.
+
+`tests/phase2f-hote-vers-zones.sh` le prouve sans démarrer de micro-VM — une paire veth et
+un espace de noms suffisent à jouer le rôle d'une VM dans la zone, donc le test tourne
+sans KVM. Il vérifie que root passe, qu'un compte ordinaire est refusé, que le compteur de
+la règle de refus a bien progressé, et que le même compte ordinaire joint la zone sur le
+port déclaré.
