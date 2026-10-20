@@ -9,7 +9,12 @@ import (
 // SchemaVersion est la version du schéma du magasin d'état. Elle est écrite
 // dans le fichier pour qu'une version ultérieure du démon sache migrer un état
 // écrit par une version antérieure.
-const SchemaVersion = 1
+//
+// Version 2 : les empreintes des artefacts démarrables. Le numéro est monté
+// plutôt que le champ ajouté en silence, parce qu'un démon antérieur lirait
+// cet état sans vérifier aucune empreinte : le refus explicite vaut mieux
+// qu'un retour en arrière qui désactive la vérification sans le dire.
+const SchemaVersion = 2
 
 // Record est ce que le démon doit se rappeler d'une VM entre deux démarrages.
 //
@@ -24,12 +29,44 @@ type Record struct {
 	// Restarts compte les relances automatiques depuis la création.
 	Restarts int `json:"restarts"`
 
+	// ConsecutiveFailures compte les arrêts non demandés depuis la dernière
+	// période de fonctionnement stable. C'est ce compteur, et non Restarts,
+	// qui décide de l'abandon : une VM relancée cent fois en six mois va
+	// bien, une VM relancée dix fois en cinq minutes ne démarrera jamais.
+	ConsecutiveFailures int `json:"consecutive_failures,omitempty"`
+
+	// GaveUpAt est l'instant où le superviseur a cessé de relancer.
+	//
+	// Non nul veut dire que la VM est en quarantaine : plus aucune relance
+	// automatique, et il faut une intervention. Sans ce champ, l'abandon ne
+	// se verrait que dans les journaux, c'est-à-dire pas du tout.
+	GaveUpAt time.Time `json:"gave_up_at,omitempty"`
+
 	// LastError retient la dernière erreur, pour que l'opérateur n'ait pas à
 	// fouiller les journaux pour savoir pourquoi une VM est en échec.
 	LastError string `json:"last_error,omitempty"`
 
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// Pin est l'empreinte retenue d'un artefact démarrable — image de micro-VM ou
+// noyau invité.
+//
+// Elle est enregistrée à la première utilisation de l'artefact et comparée à
+// chaque démarrage suivant : c'est ce qui fait qu'une image modifiée dans le
+// catalogue ne démarre pas. Voir integrity.go pour ce que cette garantie vaut
+// exactement, et ce qu'elle ne couvre pas.
+type Pin struct {
+	// SHA256 est l'empreinte attendue, en hexadécimal minuscule.
+	SHA256 string `json:"sha256"`
+
+	// Source dit d'où vient cette empreinte : métadonnées de construction,
+	// première utilisation, ou acceptation explicite par un opérateur. Sans
+	// cette information, impossible de savoir ce que la vérification vaut.
+	Source string `json:"source"`
+
+	PinnedAt time.Time `json:"pinned_at"`
 }
 
 // Snapshot est l'état constaté complet du démon, tel qu'il est écrit sur disque.
@@ -47,6 +84,16 @@ type Snapshot struct {
 	// l'autre : sinon les fichiers de travail de la passe précédente
 	// deviendraient illisibles pour elle.
 	Identities map[string]int `json:"identities,omitempty"`
+
+	// Artifacts associe le chemin absolu d'un artefact démarrable à son
+	// empreinte retenue.
+	//
+	// La clé est le chemin, et non le nom du service : un artefact est un
+	// fichier, et c'est son contenu à cet endroit qui est vérifié. Pointer un
+	// service vers une autre image est un changement de configuration du
+	// démon, pas une altération d'image — qui peut changer la ligne de
+	// commande peut aussi passer -trust.
+	Artifacts map[string]Pin `json:"artifacts,omitempty"`
 
 	// Alloc retient le préfixe IPv6 de l'installation, les indices de zone et
 	// les adresses attribuées.

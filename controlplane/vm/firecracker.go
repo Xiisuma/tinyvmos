@@ -44,6 +44,12 @@ type Firecracker struct {
 	FirecrackerBin string
 	JailerBin      string
 
+	// ConsoleMaxBytes et ConsoleKeep bornent le journal de console de chaque
+	// VM. Sans borne, une VM bavarde remplit la partition et emporte toute la
+	// machine avec elle.
+	ConsoleMaxBytes int64
+	ConsoleKeep     int
+
 	Log *slog.Logger
 
 	mu       sync.Mutex
@@ -72,10 +78,12 @@ func NewFirecracker(runDir, chrootBaseDir string, log *slog.Logger) (*Firecracke
 	}
 
 	f := &Firecracker{
-		RunDir:        runDir,
-		ChrootBaseDir: chrootBaseDir,
-		Log:           log,
-		machines:      map[string]*instance{},
+		RunDir:          runDir,
+		ChrootBaseDir:   chrootBaseDir,
+		Log:             log,
+		ConsoleMaxBytes: ConsoleMaxBytes,
+		ConsoleKeep:     ConsoleKeep,
+		machines:        map[string]*instance{},
 	}
 
 	var err error
@@ -288,13 +296,19 @@ func (f *Firecracker) Start(ctx context.Context, name string) error {
 		return fmt.Errorf("vm %s : nettoyage de la jail %s : %w", name, jail, err)
 	}
 
-	console, err := os.OpenFile(consolePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o640)
+	// Le journal passe par un rotateur, et il est confié au SDK comme
+	// io.Writer et non comme *os.File. os/exec interpose alors un tube et une
+	// goroutine de recopie : le processus confiné n'hérite jamais d'un
+	// descripteur vers le fichier.
+	//
+	// Deux conséquences, toutes deux voulues. La rotation est sûre, puisque
+	// personne d'autre ne tient le fichier ouvert. Et le journal reste la
+	// propriété de root en 0600 : une VM ne peut ni relire ni réécrire la
+	// trace de ce qu'elle a fait, ce que l'ancien chown vers son identité lui
+	// permettait.
+	console, err := NewConsoleWriter(consolePath, f.ConsoleMaxBytes, f.ConsoleKeep)
 	if err != nil {
-		return fmt.Errorf("vm %s : ouverture du journal de console : %w", name, err)
-	}
-	if err := console.Chown(spec.UID, spec.GID); err != nil {
-		console.Close()
-		return fmt.Errorf("vm %s : attribution du journal de console : %w", name, err)
+		return fmt.Errorf("vm %s : %w", name, err)
 	}
 
 	uid, gid := spec.UID, spec.GID

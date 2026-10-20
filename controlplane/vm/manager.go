@@ -19,6 +19,20 @@ const (
 	restartBackoffMin   = 1 * time.Second
 	restartBackoffMax   = 60 * time.Second
 	restartStableWindow = 60 * time.Second
+
+	// maxConsecutiveRestarts est le nombre d'arrêts non demandés consécutifs
+	// au-delà duquel le superviseur abandonne.
+	//
+	// Relancer indéfiniment une VM qui ne démarrera jamais — image cassée,
+	// service en panne au premier appel, configuration fausse — occupe le
+	// processeur, remplit le journal de console et masque la panne au milieu
+	// du bruit. Avec la temporisation doublante, dix échecs représentent près
+	// de cinq minutes : assez pour laisser passer une cause transitoire,
+	// assez peu pour ne pas boucler toute la nuit.
+	//
+	// L'abandon n'est pas définitif : un démarrage explicite lève la
+	// quarantaine.
+	maxConsecutiveRestarts = 10
 )
 
 // ErrUnknownVM est renvoyée pour une VM absente de l'état.
@@ -33,6 +47,21 @@ type Manager struct {
 	store Store
 	log   *slog.Logger
 	clock func() time.Time
+
+	// host et capacity portent les plafonds de ressources. Ils sont relevés à
+	// la construction : la mémoire installée ne change pas en cours de route,
+	// et la relire à chaque opération donnerait des refus qui dépendent de
+	// l'instant où on regarde.
+	host     HostResources
+	capacity CapacityPolicy
+
+	// Paramètres de la supervision, champs plutôt que constantes pour que les
+	// tests puissent les réduire : vérifier un abandon au bout de dix
+	// relances prendrait cinq minutes à l'échelle réelle.
+	backoffMin   time.Duration
+	backoffMax   time.Duration
+	stableWindow time.Duration
+	maxFailures  int
 
 	mu    sync.Mutex
 	snap  *Snapshot
@@ -53,14 +82,72 @@ func NewManager(vmm VMM, store Store, log *slog.Logger) (*Manager, error) {
 	if err != nil {
 		return nil, err
 	}
+	host, err := ReadHostResources()
+	if err != nil {
+		return nil, err
+	}
 	return &Manager{
-		vmm:   vmm,
-		store: store,
-		log:   log,
-		clock: time.Now,
-		snap:  snap,
-		super: map[string]*supervision{},
+		vmm:          vmm,
+		store:        store,
+		log:          log,
+		clock:        time.Now,
+		host:         host,
+		capacity:     DefaultCapacityPolicy(),
+		backoffMin:   restartBackoffMin,
+		backoffMax:   restartBackoffMax,
+		stableWindow: restartStableWindow,
+		maxFailures:  maxConsecutiveRestarts,
+		snap:         snap,
+		super:        map[string]*supervision{},
 	}, nil
+}
+
+// SetCapacity remplace les plafonds par défaut.
+func (m *Manager) SetCapacity(p CapacityPolicy) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.capacity = p
+}
+
+// Host renvoie les ressources relevées sur la machine.
+func (m *Manager) Host() HostResources { return m.host }
+
+// Capacity renvoie les plafonds en vigueur.
+func (m *Manager) Capacity() CapacityPolicy {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.capacity
+}
+
+// admitLocked vérifie que la machine peut porter l'ensemble des VM déclarées,
+// celle qu'on ajoute comprise.
+//
+// Le contrôle porte sur l'ensemble, pas sur la seule VM qui arrive : c'est la
+// somme qui dépasse, jamais une VM isolée. La VM homonyme est exclue du total
+// pour qu'une redéclaration ne se compte pas deux fois.
+//
+// Le verrou doit être tenu.
+func (m *Manager) admitLocked(spec Spec) error {
+	budgets := []Budget{{Name: spec.Name, VCPU: spec.VCPU, MemMiB: spec.MemMiB}}
+	for nom, rec := range m.snap.VMs {
+		if nom == spec.Name {
+			continue
+		}
+		budgets = append(budgets, Budget{
+			Name:   rec.Spec.Name,
+			VCPU:   rec.Spec.VCPU,
+			MemMiB: rec.Spec.MemMiB,
+		})
+	}
+
+	rapport, err := m.capacity.Admit(m.host, budgets)
+	if err != nil {
+		return err
+	}
+	for _, avertissement := range rapport.Warnings {
+		m.log.Warn(avertissement, "vm", spec.Name)
+	}
+	return nil
 }
 
 // persistLocked écrit l'état. Appelée une fois par opération publique, jamais
@@ -68,6 +155,64 @@ func NewManager(vmm VMM, store Store, log *slog.Logger) (*Manager, error) {
 // Le verrou doit être tenu.
 func (m *Manager) persistLocked() error {
 	return m.store.Save(m.snap)
+}
+
+// verifyArtifactsLocked refuse de préparer une VM dont l'image ou le noyau ne
+// correspond pas à son empreinte retenue.
+//
+// Elle est appelée avant vmm.Create, donc avant que l'artefact ne soit copié
+// dans le dossier de travail de la VM : c'est le fichier du catalogue qui est
+// vérifié, celui qui serait modifié. Vérifier la copie n'aurait rien prouvé,
+// puisque c'est nous qui venons de la faire.
+//
+// Les deux artefacts sont vérifiés avant qu'aucune empreinte ne soit
+// enregistrée. Une VM dont l'image passe et dont le noyau échoue ne doit rien
+// laisser derrière elle, sans quoi la prochaine tentative accepterait l'image
+// sans la revérifier.
+//
+// Le verrou doit être tenu.
+func (m *Manager) verifyArtifactsLocked(spec Spec) error {
+	if m.snap.Artifacts == nil {
+		m.snap.Artifacts = map[string]Pin{}
+	}
+
+	now := m.clock()
+	fresh := map[string]Pin{}
+
+	for _, artefact := range []struct{ role, path string }{
+		{"image", spec.ImagePath},
+		{"noyau", spec.KernelPath},
+	} {
+		path, pin, isNew, err := verifyArtifact(m.snap.Artifacts, artefact.path, artefact.role, now)
+		if err != nil {
+			return fmt.Errorf("vm %s : %w", spec.Name, err)
+		}
+		if !isNew {
+			m.log.Debug("artefact vérifié",
+				"vm", spec.Name, "artefact", artefact.role,
+				"chemin", path, "empreinte", pin.SHA256)
+			continue
+		}
+		fresh[path] = pin
+
+		// La différence entre les deux cas compte : dans le premier, quelque
+		// chose d'indépendant confirme le fichier ; dans le second, on
+		// enregistre ce qui était là, et on le dit.
+		if pin.Source == PinSourceMetadata {
+			m.log.Info("empreinte d'artefact enregistrée, confirmée par les métadonnées de construction",
+				"vm", spec.Name, "artefact", artefact.role,
+				"chemin", path, "empreinte", pin.SHA256)
+		} else {
+			m.log.Warn("empreinte d'artefact enregistrée sans confirmation indépendante : aucune métadonnée de construction à côté du fichier",
+				"vm", spec.Name, "artefact", artefact.role,
+				"chemin", path, "empreinte", pin.SHA256)
+		}
+	}
+
+	for path, pin := range fresh {
+		m.snap.Artifacts[path] = pin
+	}
+	return nil
 }
 
 // Create enregistre une VM et la prépare auprès de l'hyperviseur.
@@ -81,6 +226,12 @@ func (m *Manager) Create(ctx context.Context, spec Spec) error {
 
 	if _, exists := m.snap.VMs[spec.Name]; exists {
 		return fmt.Errorf("vm %s déjà déclarée", spec.Name)
+	}
+	if err := m.admitLocked(spec); err != nil {
+		return err
+	}
+	if err := m.verifyArtifactsLocked(spec); err != nil {
+		return err
 	}
 	if err := m.vmm.Create(ctx, spec); err != nil {
 		return err
@@ -111,6 +262,14 @@ func (m *Manager) Ensure(ctx context.Context, spec Spec) error {
 	}
 
 	m.mu.Lock()
+	if err := m.admitLocked(spec); err != nil {
+		m.mu.Unlock()
+		return err
+	}
+	if err := m.verifyArtifactsLocked(spec); err != nil {
+		m.mu.Unlock()
+		return err
+	}
 	rec, known := m.snap.VMs[spec.Name]
 	if known {
 		rec.Spec = spec
@@ -153,6 +312,16 @@ func (m *Manager) Start(ctx context.Context, name string) error {
 		m.mu.Unlock()
 		return fmt.Errorf("vm %s : transition %s vers %s interdite", name, rec.Status, StatusStarting)
 	}
+	// Un démarrage explicite lève la quarantaine : c'est l'intervention que
+	// l'abandon réclamait. Sans cette remise à zéro, une VM abandonnée une
+	// fois le resterait, et le compteur la ferait abandonner de nouveau au
+	// premier incident suivant.
+	if !rec.GaveUpAt.IsZero() {
+		m.log.Info("quarantaine levée par un démarrage explicite",
+			"vm", name, "échecs_consécutifs", rec.ConsecutiveFailures)
+	}
+	rec.GaveUpAt = time.Time{}
+	rec.ConsecutiveFailures = 0
 	rec.Status = StatusStarting
 	rec.UpdatedAt = m.clock()
 	m.mu.Unlock()
@@ -198,7 +367,7 @@ func (m *Manager) superviseLocked(name string) {
 func (m *Manager) supervise(ctx context.Context, name string, done chan struct{}) {
 	defer close(done)
 
-	backoff := restartBackoffMin
+	backoff := m.backoffMin
 
 	for {
 		waitErr := m.vmm.Wait(ctx, name)
@@ -221,10 +390,15 @@ func (m *Manager) supervise(ctx context.Context, name string, done chan struct{}
 			return
 		}
 
+		// Une VM qui a tenu assez longtemps repart de zéro : sa panne n'a
+		// rien à voir avec celles d'hier, et la compter avec elles finirait
+		// par mettre en quarantaine un service qui tourne depuis des mois.
 		uptime := m.clock().Sub(rec.UpdatedAt)
-		if uptime >= restartStableWindow {
-			backoff = restartBackoffMin
+		if uptime >= m.stableWindow {
+			backoff = m.backoffMin
+			rec.ConsecutiveFailures = 0
 		}
+		rec.ConsecutiveFailures++
 
 		cause := "arrêt inattendu de la vm"
 		if waitErr != nil {
@@ -235,13 +409,37 @@ func (m *Manager) supervise(ctx context.Context, name string, done chan struct{}
 		rec.PID = 0
 		rec.UpdatedAt = m.clock()
 		restart := rec.Spec.Restart
+		echecs := rec.ConsecutiveFailures
+
+		// Abandon : au-delà du plafond, relancer encore ne corrigera rien et
+		// masquera la panne dans le bruit. La VM reste en échec, le champ
+		// GaveUpAt dit qu'elle est en quarantaine, et plus personne ne la
+		// relance tant qu'un humain n'est pas intervenu.
+		abandon := restart && echecs >= m.maxFailures
+		if abandon {
+			rec.GaveUpAt = m.clock()
+			rec.LastError = fmt.Sprintf(
+				"abandon après %d arrêts consécutifs : %s. La relance automatique est suspendue ; "+
+					"corriger la cause puis redémarrer la vm explicitement",
+				echecs, cause)
+		}
 		_ = m.persistLocked()
 		m.mu.Unlock()
 
-		// cause et restart sont des copies : rec ne doit plus être lu hors du
-		// verrou, sinon le détecteur de course a raison de râler.
+		// cause, restart, echecs et abandon sont des copies : rec ne doit plus
+		// être lu hors du verrou, sinon le détecteur de course a raison de
+		// râler.
 		m.log.Warn("vm arrêtée sans demande",
-			"vm", name, "cause", cause, "durée_de_vie", uptime.Round(time.Millisecond))
+			"vm", name, "cause", cause,
+			"durée_de_vie", uptime.Round(time.Millisecond),
+			"échecs_consécutifs", echecs)
+
+		if abandon {
+			m.log.Error("relance abandonnée : la vm échoue en boucle",
+				"vm", name, "échecs_consécutifs", echecs, "cause", cause,
+				"remède", "corriger la cause, puis redémarrer la vm explicitement pour lever la quarantaine")
+			return
+		}
 
 		if !restart {
 			return
@@ -254,10 +452,10 @@ func (m *Manager) supervise(ctx context.Context, name string, done chan struct{}
 		case <-time.After(backoff):
 		}
 
-		if next := backoff * 2; next <= restartBackoffMax {
+		if next := backoff * 2; next <= m.backoffMax {
 			backoff = next
 		} else {
-			backoff = restartBackoffMax
+			backoff = m.backoffMax
 		}
 
 		if err := m.restart(ctx, name); err != nil {

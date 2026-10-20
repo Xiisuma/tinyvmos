@@ -92,6 +92,14 @@ func migrate(snap *vm.Snapshot) error {
 	case snap.Version > vm.SchemaVersion:
 		return fmt.Errorf("état en version %d, ce démon ne connaît que la version %d : mettre le démon à jour plutôt que de risquer d'écraser des champs inconnus",
 			snap.Version, vm.SchemaVersion)
+	case snap.Version < vm.SchemaVersion:
+		// Rien à transformer : les versions antérieures ne portaient pas
+		// d'empreintes d'artefacts, et leur absence est exactement le cas de
+		// la première utilisation. On monte quand même le numéro, pour qu'un
+		// démon antérieur — qui ne vérifierait aucune empreinte — refuse de
+		// repartir sur cet état.
+		snap.Version = vm.SchemaVersion
+		return nil
 	default:
 		return nil
 	}

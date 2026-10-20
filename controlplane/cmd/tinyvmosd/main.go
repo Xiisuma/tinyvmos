@@ -76,6 +76,17 @@ func main() {
 		dumpFlows = flag.Bool("print-flows", false, "affiche les flux d'exemple en JSON et quitte")
 		dumpRules = flag.Bool("print-ruleset", false, "affiche le jeu de règles nftables qui serait appliqué et quitte")
 		keepNet   = flag.Bool("keep-network", false, "conserve bridges et interfaces tap à l'extinction")
+		hostRes   = flag.Int64("host-reserve", 0,
+			"mémoire en Mio laissée à la machine elle-même. 0 applique la règle par défaut :\n"+
+				"  le plus élevé entre 512 Mio et 10 % de la mémoire installée")
+		consoleMax = flag.Int64("console-max-size", vm.ConsoleMaxBytes/(1<<20),
+			"taille en Mio au-delà de laquelle le journal de console d'une vm est mis de côté")
+		consoleKeep = flag.Int("console-keep", vm.ConsoleKeep,
+			"nombre de journaux de console conservés par vm, en plus du courant.\n"+
+				"  Chaque fichier se paie par vm : trente vm font trente fois ce volume")
+		maxVMs = flag.Int("max-vms", vm.DefaultMaxVMs,
+			"plafond du nombre de vm déclarées. Garde-fou contre une configuration engendrée\n"+
+				"  en boucle : sur toute machine réelle, la mémoire refusera bien avant")
 	)
 	flag.Var(&vms, "vm", "vm à faire tourner, répétable. Forme :\n"+
 		"  name=web1,service=web-apache,zone=publique[,vcpu=1][,mem=256][,restart=true]\n"+
@@ -116,6 +127,10 @@ func main() {
 		vms:       vms,
 		listOnly:  *listOnly,
 		keepNet:   *keepNet,
+		hostRes:   *hostRes,
+		maxVMs:    *maxVMs,
+		consoleMx: *consoleMax,
+		consoleKp: *consoleKeep,
 		dumpRules: *dumpRules,
 	}
 	if err := run(log, opts); err != nil {
@@ -144,6 +159,10 @@ type runOptions struct {
 	vms       []string
 	listOnly  bool
 	keepNet   bool
+	hostRes   int64
+	maxVMs    int
+	consoleMx int64
+	consoleKp int
 	dumpRules bool
 }
 
@@ -225,10 +244,46 @@ func run(log *slog.Logger, o runOptions) error {
 	if err != nil {
 		return err
 	}
+	if o.consoleMx > 0 {
+		hypervisor.ConsoleMaxBytes = o.consoleMx * (1 << 20)
+	}
+	if o.consoleKp >= 0 {
+		hypervisor.ConsoleKeep = o.consoleKp
+	}
 	mgr, err := vm.NewManager(hypervisor, store, log)
 	if err != nil {
 		return err
 	}
+	// Les plafonds de ressources sont appliqués avant qu'un seul bridge ne
+	// soit posé. Refuser à la septième vm après en avoir démarré six
+	// laisserait six interfaces tap et six jails derrière soi, pour un
+	// déploiement de toute façon invalide.
+	capacite := vm.DefaultCapacityPolicy()
+	capacite.HostReserveMiB = o.hostRes
+	capacite.MaxVMs = o.maxVMs
+	mgr.SetCapacity(capacite)
+
+	budgets := make([]vm.Budget, 0, len(requests))
+	for _, r := range requests {
+		budgets = append(budgets, vm.Budget{Name: r.Name, VCPU: r.VCPU, MemMiB: r.MemMiB})
+	}
+	rapport, err := capacite.Admit(mgr.Host(), budgets)
+	if err != nil {
+		return err
+	}
+	for _, avertissement := range rapport.Warnings {
+		log.Warn(avertissement)
+	}
+	log.Info("budget de la machine",
+		"vm", rapport.VMs,
+		"mémoire_demandée_mio", rapport.MemRequested,
+		"surcoût_mio", rapport.MemOverhead,
+		"réserve_hôte_mio", rapport.MemReserved,
+		"mémoire_installée_mio", rapport.MemTotal,
+		"libre_après_mio", rapport.MemFree(),
+		"cœurs_virtuels", rapport.VCPURequested,
+		"cœurs_réels", rapport.CPUs)
+
 	netMgr := network.NewManager(log)
 	firewall := network.NewFirewall(log, o.uplink, filepath.Join(o.runDir, "ruleset.nft"))
 
@@ -484,25 +539,90 @@ func printRuleset(log *slog.Logger, o runOptions) error {
 		return err
 	}
 
-	// Les zones d'exemple n'ont pas d'IPv6 avant attribution ; on en tire une
-	// jetable pour que l'affichage soit représentatif.
-	alloc, err := network.NewAllocation()
+	pubs, err := loadPublications(o.pubsPath)
 	if err != nil {
 		return err
 	}
+
+	// Les adresses viennent de l'état, pas d'un tirage jetable.
+	//
+	// La première version tirait un préfixe local unique neuf à chaque appel :
+	// les adresses IPv6 affichées n'étaient celles de personne, et surtout pas
+	// celles qui allaient être appliquées. Sur un pare-feu, lire autre chose
+	// que ce qui sera posé est pire que ne rien lire — l'opérateur croit avoir
+	// vérifié.
+	//
+	// L'état est lu sans droits root : il peut être absent ou illisible ici,
+	// et ce n'est pas une erreur, c'est le cas du tout premier démarrage.
+	alloc := stateAllocation(o.statePath)
+	source := "état " + o.statePath
+	if alloc == nil {
+		// Rien à lire : il faut bien montrer quelque chose, mais il faut dire
+		// que ce n'est qu'une illustration.
+		if alloc, err = network.NewAllocation(); err != nil {
+			return err
+		}
+		source = "préfixe tiré pour cet aperçu, ce n'est PAS celui qui sera appliqué"
+	}
+
 	for i := range zones {
 		if err := alloc.ResolveZoneIPv6(&zones[i]); err != nil {
 			return err
 		}
 	}
 
+	leases := map[string]network.Lease{}
+	for nom, bail := range alloc.Leases {
+		if bail != nil {
+			leases[nom] = *bail
+		}
+	}
+
+	// Les publications ne sont montrées que si les adresses des vm sont
+	// connues : une redirection vers une adresse inventée induirait en erreur
+	// exactement comme le préfixe jetable.
+	politique := network.Policy{Zones: zones, Flows: flows}
+	note := ""
+	switch {
+	case len(pubs) == 0:
+	case len(leases) == 0:
+		note = fmt.Sprintf("%d publication(s) déclarée(s), non affichées : les adresses des vm ne sont pas encore attribuées", len(pubs))
+	default:
+		politique.Publications = pubs
+		politique.Leases = leases
+	}
+
 	fw := network.NewFirewall(log, o.uplink, "")
-	ruleset, err := fw.Ruleset(network.Policy{Zones: zones, Flows: flows})
+	ruleset, err := fw.Ruleset(politique)
 	if err != nil {
 		return err
 	}
+
+	fmt.Printf("# adressage IPv6 : %s\n", source)
+	if note != "" {
+		fmt.Printf("# %s\n", note)
+	}
 	fmt.Print(ruleset)
 	return nil
+}
+
+// stateAllocation lit l'attribution persistée, ou nil si elle n'est pas
+// lisible. L'absence d'état est le cas normal du premier démarrage, et cette
+// fonction tourne sans droits root : elle ne doit jamais faire échouer un
+// simple affichage.
+func stateAllocation(path string) *network.Allocation {
+	if path == "" {
+		return nil
+	}
+	store, err := state.NewJSONStore(path)
+	if err != nil {
+		return nil
+	}
+	snap, err := store.Load()
+	if err != nil || snap == nil {
+		return nil
+	}
+	return snap.Alloc
 }
 
 // loadPublications lit les services publiés depuis un fichier JSON.
@@ -567,6 +687,35 @@ func loadZones(path string) ([]network.Zone, error) {
 	return zones, nil
 }
 
+// trustArtifacts enregistre l'empreinte actuelle des artefacts indiqués.
+//
+// C'est l'échappatoire volontaire du dispositif d'intégrité : une image
+// reconstruite change d'empreinte, le démon refuse alors de démarrer, et il
+// faut qu'un humain confirme. Sans cette commande, la seule issue serait de
+// supprimer l'état, ce qui emporterait aussi les adresses et les identités.
+func trustArtifacts(log *slog.Logger, store *state.JSONStore, paths []string) error {
+	snap, err := store.Load()
+	if err != nil {
+		return err
+	}
+
+	now := time.Now()
+	for _, raw := range paths {
+		path, pin, err := vm.PinArtifact(snap, raw, now)
+		if err != nil {
+			return err
+		}
+		log.Info("empreinte acceptée", "chemin", path, "empreinte", pin.SHA256)
+		fmt.Printf("%s\n  %s\n", path, pin.SHA256)
+	}
+
+	if err := store.Save(snap); err != nil {
+		return err
+	}
+	fmt.Printf("\n%d empreinte(s) enregistrée(s) dans %s\n", len(paths), store.Path())
+	return nil
+}
+
 func printState(store *state.JSONStore) error {
 	snap, err := store.Load()
 	if err != nil {
@@ -589,17 +738,38 @@ func printState(store *state.JSONStore) error {
 		fmt.Println()
 	}
 
+	if len(snap.Artifacts) > 0 {
+		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(w, "ARTEFACT\tEMPREINTE\tORIGINE\tRETENUE LE")
+		for _, a := range vm.SortedPins(snap.Artifacts) {
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\n",
+				a.Path, a.Pin.SHA256, a.Pin.Source,
+				a.Pin.PinnedAt.Format(time.RFC3339))
+		}
+		if err := w.Flush(); err != nil {
+			return err
+		}
+		fmt.Println()
+	}
+
 	if len(snap.VMs) == 0 {
 		fmt.Println("aucune vm enregistrée")
 		return nil
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "NOM\tSERVICE\tZONE\tSTATUT\tUID\tPID\tRELANCES\tIPV4\tIPV6\tERREUR")
+	fmt.Fprintln(w, "NOM\tSERVICE\tZONE\tSTATUT\tUID\tPID\tRELANCES\tQUARANTAINE\tIPV4\tIPV6\tERREUR")
 	for _, rec := range snap.VMs {
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\t%d\t%d\t%s\t%s\t%s\n",
+		// La quarantaine doit se voir ici : sinon l'abandon n'existe que dans
+		// les journaux, c'est-à-dire nulle part au moment où on cherche
+		// pourquoi un service ne répond plus.
+		quarantaine := "-"
+		if !rec.GaveUpAt.IsZero() {
+			quarantaine = rec.GaveUpAt.Format(time.RFC3339)
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\t%d\t%d\t%s\t%s\t%s\t%s\n",
 			rec.Spec.Name, rec.Spec.Service, rec.Spec.Zone,
-			rec.Status, rec.Spec.UID, rec.PID, rec.Restarts,
+			rec.Status, rec.Spec.UID, rec.PID, rec.Restarts, quarantaine,
 			rec.Spec.IP, rec.Spec.IPv6, rec.LastError)
 	}
 	return w.Flush()

@@ -192,6 +192,7 @@ func (f *Firewall) ruleset(p Policy) (string, error) {
 
 	f.writeForwardChain(w, p, uplink)
 	f.writeInputChain(w, p)
+	f.writeOutputChain(w, p)
 	f.writePreroutingChain(w, p, uplink)
 	f.writeNATChain(w, p, uplink)
 
@@ -364,6 +365,84 @@ func (f *Firewall) writeInputChain(w func(string, ...any), p Policy) {
 	w("\t\t# d administration de la machine.")
 	w("\t\tiifname @%s limit rate 10/minute log prefix \"tinyvmos refus vers hote \" level info", zoneSetName)
 	w("\t\tiifname @%s counter drop", zoneSetName)
+	w("\t}")
+	w("")
+}
+
+// writeOutputChain écrit la chaîne qui filtre ce que l hôte envoie aux zones.
+//
+// Jusqu ici, rien ne filtrait ce sens. L hôte pouvait joindre n importe quelle
+// VM sur n importe quel port, et un flux « from: host » déclaré ne produisait
+// aucune règle : il était silencieusement ignoré, ce qui est pire que de ne
+// pas exister.
+//
+// Il faut être précis sur ce que ce filtrage apporte, parce que la tentation
+// est de croire qu il protège de plus qu il ne protège.
+//
+// Il ne contient PAS un attaquant qui a déjà root sur l hôte. Rien dans
+// nftables ne le pourrait : root vide la table. Ce qu il contient, c est un
+// service non privilégié compromis sur la machine — un serveur web, un agent,
+// n importe quoi qui tourne sous son propre compte — et les accidents de
+// configuration. Dans une architecture où une VM égale un service, l hôte qui
+// peut joindre toutes les zones sans contrainte est précisément le pivot qui
+// annule le cloisonnement.
+//
+// D où la règle centrale : le trafic émis par un processus de root passe,
+// celui de tout autre compte est refusé sauf flux déclaré. L opérateur qui
+// diagnostique et le démon lui-même travaillent sans entrave ; un service
+// compromis qui tourne sous son propre compte ne découvre rien.
+func (f *Firewall) writeOutputChain(w func(string, ...any), p Policy) {
+	w("\tchain output {")
+	w("\t\ttype filter hook output priority filter; policy accept;")
+	w("")
+	w("\t\tct state established,related accept")
+	w("")
+	w("\t\t# ICMP et ICMPv6 : decouverte de voisins, decouverte du MTU, et")
+	w("\t\t# diagnostic. Les jeter casserait IPv6 et rendrait les vm")
+	w("\t\t# injoignables au ping, ce qui est la premiere chose qu on tente.")
+	w("\t\ticmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit, nd-router-advert, echo-request, echo-reply, destination-unreachable, packet-too-big, time-exceeded, parameter-problem } accept")
+	w("\t\ticmp type { echo-request, echo-reply, destination-unreachable, time-exceeded, parameter-problem } accept")
+	w("")
+	w("\t\t# Un RST engendre par le noyau n a pas de socket, donc pas de")
+	w("\t\t# proprietaire : le jeter transformerait un refus franc en attente")
+	w("\t\t# sans fin cote vm.")
+	w("\t\toifname @%s tcp flags rst accept", zoneSetName)
+	w("")
+
+	hostFlows := 0
+	for _, fl := range p.Flows {
+		if fl.From != ZoneHost {
+			continue
+		}
+		dst, ok := p.zoneByName(fl.To)
+		if !ok {
+			continue
+		}
+		if fl.Comment != "" {
+			w("\t\t# %s", fl.Comment)
+		}
+		w("\t\t%s", rule(
+			fmt.Sprintf("oifname %q", dst.BridgeName()),
+			matchExpr(fl),
+			"accept",
+		))
+		hostFlows++
+	}
+	if hostFlows == 0 {
+		w("\t\t# Aucun flux declare de l hote vers une zone.")
+	}
+	w("")
+
+	w("\t\t# Les processus de root : operateur en diagnostic, demon lui-meme.")
+	w("\t\t# Ce filtrage vise un service non privilegie compromis, pas root,")
+	w("\t\t# que rien dans nftables ne saurait contenir de toute facon.")
+	w("\t\toifname @%s meta skuid 0 counter accept", zoneSetName)
+	w("")
+	w("\t\t# Le reste de ce qui part vers une zone est refuse. La politique de")
+	w("\t\t# la chaine reste accept : la mettre a drop couperait tout le trafic")
+	w("\t\t# sortant de la machine, y compris celui qui ne nous concerne pas.")
+	w("\t\toifname @%s limit rate 10/minute log prefix \"tinyvmos refus hote vers zone \" level info", zoneSetName)
+	w("\t\toifname @%s counter drop", zoneSetName)
 	w("\t}")
 	w("")
 }

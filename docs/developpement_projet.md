@@ -49,7 +49,7 @@ Wi-Fi interne de l'IUT
 La machine de développement (Ryzen 7 260, 15,29 Go de RAM, RTX 5050 8 Go) n'est **pas** représentative de la machine cible, qui est plus faible. Règles qui en découlent :
 
 - **Budget mémoire par micro-VM fixé bas dès la conception.** Ordre de grandeur visé : 64 à 128 Mio pour un service d'infrastructure (SSH, DNS, FTP, reverse proxy), 256 Mio pour Apache. Ces valeurs sont déclarées dans `tinyvmos.yaml` et vérifiées en test, pas laissées au hasard.
-- **Le démon doit refuser un déploiement** qui dépasse la RAM disponible de la machine, au lieu de laisser l'OOM killer trancher en pleine épreuve.
+- [x] **Le démon refuse un déploiement** qui dépasse la mémoire installée, au lieu de laisser le tueur de mémoire du noyau trancher en pleine épreuve. Le calcul compte les budgets déclarés, le surcoût des processus Firecracker et une réserve pour la machine elle-même ; il porte sur l'ensemble des vm et précède toute création de bridge. Le surengagement processeur est signalé sans être refusé, puisque le temps se partage, contrairement à la mémoire.
 - **L'IA est le poste le plus lourd et le plus incertain.** Sans GPU sur la cible et avec peu de RAM, un modèle 7–8B peut être hors de portée. Prévoir une descente en gamme : 3B quantifié, voire 1,5B, voire abandon de l'IA sur la machine de l'événement si le budget ne passe pas. **Ce n'est décidable qu'une fois les caractéristiques de la cible connues.**
 - **Mesurer, pas supposer** : chaque image du catalogue est profilée (RAM au repos, RAM en charge, temps de démarrage) et le résultat consigné. Un tableau de budget mémoire est tenu à jour dans `docs/`.
 - **Le GPU de la machine de dev sert uniquement au dev** (llama.cpp dans WSL2 pour itérer vite). Il ne doit jamais devenir une hypothèse de production.
@@ -111,6 +111,7 @@ La machine de développement (Ryzen 7 260, 15,29 Go de RAM, RTX 5050 8 Go) n'est
 - [x] Constructeur générique `images/build-image.sh` plutôt qu'un script par service : il lit `images/<service>/image.conf` et sera réutilisé tel quel pour tout le catalogue de la Phase 6.
 - [x] Apache démarré par OpenRC au boot, page de test servie.
 - [x] Image reproductible : versions Alpine et noyau figées, empreintes SHA-256 vérifiées au téléchargement, empreinte de l'image consignée dans son fichier de métadonnées.
+- [x] **Empreinte vérifiée avant tout démarrage**, image comme noyau invité. L'autorité est l'empreinte retenue dans l'état du démon, enregistrée à la première utilisation et comparée ensuite ; les métadonnées de construction ne sont qu'un contrôle d'appoint, puisqu'elles se modifient aussi facilement que l'image. Une image reconstruite ne démarre plus tant qu'un opérateur n'a pas passé `-trust`. Vérifié par test, y compris le cas d'une image modifiée dont les métadonnées ont été mises à jour en même temps.
 
 ### 1.3 Réseau virtuel minimal
 - [x] `build/net-setup.sh` crée le bridge et l'interface tap, avec un garde-fou qui refuse un sous-réseau déjà routé par une autre interface.
@@ -145,6 +146,9 @@ La machine de développement (Ryzen 7 260, 15,29 Go de RAM, RTX 5050 8 Go) n'est
 - [x] Lancement systématique via `jailer`, **une identité confinée par VM** (uid et gid dédiés dans la plage réservée 60000-60999, persistés), seccomp en mode strict. Vérifié par test, y compris par une tentative de lecture croisée entre deux VM.
 - [x] Machine d'état explicite avec table de transitions : une transition absente de la table est refusée, pas tolérée.
 - [x] Relance automatique avec temporisation doublante de 1 s à 60 s, remise à zéro après 60 s de stabilité. Un arrêt demandé ne déclenche pas de relance.
+- [x] **Abandon après dix arrêts consécutifs**, signalé par une ligne de journal au niveau erreur, le champ `gave_up_at` de l’état et une colonne `QUARANTAINE` dans `tinyvmosd -list`. Le compteur se remet à zéro sur la durée de fonctionnement et non sur un démarrage réussi : une vm qui s’écroule aussitôt relancée réussit son démarrage à chaque tour et ne serait jamais abandonnée. Un démarrage explicite lève la quarantaine.
+- [x] **Le journal de console de chaque vm est borné** : 4 Mio par fichier et un conservé par défaut, rotation faite dans le démon. Sans borne, une vm bavarde remplit la partition et emporte toute la machine. Le journal est désormais la propriété de root en 0600 : une vm ne peut plus relire ni réécrire la trace de ce qu'elle a fait.
+- [x] **Le sens hôte vers les zones est filtré** par une chaîne `output` : le trafic des processus de root passe, celui de tout autre compte est refusé sauf flux `from: host` déclaré. Cela contient un service non privilégié compromis sur la machine et les accidents de configuration, pas un attaquant déjà root — rien dans nftables ne le pourrait. Un flux `from: host` déclaré produit enfin une règle, au lieu d'être silencieusement ignoré.
 - [x] Tests unitaires avec `vm.FakeVMM` : machine d'état, supervision et temporisation exercées sans KVM ni Firecracker, donc aussi dans la CI.
 
 ### 2.3 Plan d'adressage et zones

@@ -124,6 +124,15 @@ func (f *FakeVMM) Crash(name string) {
 	}
 }
 
+// SetStartErr fait échouer tous les démarrages suivants, ou les rétablit
+// avec nil. Passer par un accesseur plutôt que par le champ : le superviseur
+// le lit depuis sa propre goroutine.
+func (f *FakeVMM) SetStartErr(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.StartErr = err
+}
+
 // IsRunning indique si la VM simulée tourne.
 func (f *FakeVMM) IsRunning(name string) bool {
 	f.mu.Lock()
